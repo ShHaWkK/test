@@ -524,7 +524,9 @@ def autocomplete(current_input, current_dir, username, fs, chan, history):
         parts[-1] = completions[0]
         return " ".join(parts)
     elif completions:
-        chan.send(b"\r\n" + "\r\n".join(c.encode() for c in completions[:10]) + b"\r\n")
+        chan.send(b"\r\n")
+        chan.send("\r\n".join(completions[:10]).encode())
+        chan.send(b"\r\n")
         return current_input
     return current_input
 
