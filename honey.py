@@ -62,7 +62,6 @@ SMTP_USER = os.getenv("SMTP_USER", "honeycute896@gmail.com")
 SMTP_PASS = os.getenv("SMTP_PASS", "jawm fmcm dmaf qkyl")
 ALERT_FROM = SMTP_USER
 ALERT_TO = os.getenv("ALERT_TO", "alexandreuzan75@gmail.com")
-
 PREDEFINED_USERS = {
     "admin": {
         "home": "/home/admin",
