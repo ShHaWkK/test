@@ -29,7 +29,6 @@ import string
 import ipapi
 from io import StringIO
 
-# Désactivation des logs dans les fichiers (géré en mémoire via alertes)
 # Configuration
 HOST = ""  # Écoute sur toutes les interfaces
 PORT = 2224  # Port personnalisé
@@ -58,9 +57,8 @@ SESSION_LOG_DIR = "session_logs"
 LOG_DIR = "logs"
 LOG_FILE = os.path.join(LOG_DIR, "honey.log")
 
-# Console key logging level: 'full', 'filtered', or 'off'
+# Console key logging level: 'full', 'filtered'
 KEY_DISPLAY_MODE = 'filtered'
-
 USER_DEFINED_COMMANDS = set()
 
 class JsonFormatter(logging.Formatter):
@@ -71,7 +69,6 @@ class JsonFormatter(logging.Formatter):
             "message": record.getMessage(),
         }
         return json.dumps(log_record)
-
 
 def setup_logging():
     os.makedirs(LOG_DIR, exist_ok=True)
@@ -240,6 +237,7 @@ def get_dynamic_ps():
         lines.append(f"{user:<10} {pid:<6} {cpu:<5} {mem:<5} {vsz:<7} {rss:<6} {tty:<6} {stat:<5} {start:<8} {time_str:<6} {cmd}")
     return "\r\n".join(lines)
 
+@lru_cache(maxsize=10)
 def get_dynamic_top():
     header = "top - %s up %d days, %02d:%02d, %d user%s, load average: %.2f, %.2f, %.2f\n" % (
         datetime.now().strftime("%H:%M:%S"), random.randint(3, 10), random.randint(0, 23),
@@ -333,6 +331,10 @@ def get_dynamic_who():
         host = f"192.168.1.{random.randint(10, 50)}"
         lines.append(f"{user:<10} {tty:<8} {timestamp} {host}")
     return "\n".join(lines)
+
+@lru_cache(maxsize=10)
+def get_dynamic_w():
+    return get_dynamic_who()
 
 def get_dev_null(): return ""
 def get_dev_zero(): return "\0" * 1024
@@ -543,7 +545,7 @@ def modify_file(fs, path, content, username, session_id, client_ip):
         return True
     return False
 
-# Alertes (remplace les logs)
+# Alertes
 def trigger_alert(session_id, event_type, details, client_ip, username):
     timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S.%f")
     geo_info = "Unknown"
@@ -586,7 +588,7 @@ def log_activity(session_id, client_ip, username, key):
     }
     LOGGER.info(json.dumps(log_entry))
     if KEY_DISPLAY_MODE == 'full':
-        print(f"[ACTIVITY] {timestamp},{session_id},{client_ip},{username},{key}")
+        print(f"[ACTIVITY] {timestamp},{session_id},{client_ip},{username},{repr(key)}")
     elif KEY_DISPLAY_MODE == 'filtered':
         if key in ['\n', '\r', '\t'] or key in string.ascii_letters[:3]:
             print(f"[{username}@{client_ip}] {repr(key)}")
@@ -805,10 +807,9 @@ def ftp_session(chan, host, username, session_id, client_ip, session_log):
             chan.send(b"502 Command not implemented.\r\n")
     session_log.append(f"FTP session to {host} closed")
 
-
 def process_command(cmd, current_dir, username, fs, client_ip, session_id, session_log, command_history, chan, jobs=None, cmd_count=0):
     if not cmd.strip():
-        return "", current_dir, jobs or [], cmd_count
+        return "", current_dir, jobs or [], cmd_count, False
     new_dir = current_dir
     output = ""
     cmd_parts = cmd.strip().split()
@@ -822,6 +823,14 @@ def process_command(cmd, current_dir, username, fs, client_ip, session_id, sessi
     risk_score = sum(malicious_patterns.get(pattern, 0) for pattern in malicious_patterns if pattern in command_seq.lower())
     if risk_score > 5:
         trigger_alert(session_id, "High Risk Command", f"Command sequence '{command_seq}' scored {risk_score} risk points", client_ip, username)
+    try:
+        with sqlite3.connect(DB_NAME, uri=True) as conn:
+            conn.execute(
+                "INSERT INTO commands (timestamp, ip, username, command, session_id) VALUES (?, ?, ?, ?, ?)",
+                (datetime.now().strftime("%Y-%m-%d %H:%M:%S"), client_ip, username, cmd, session_id)
+            )
+    except sqlite3.Error as e:
+        print(f"[!] Command logging error: {e}")
     if cmd_name in ["ls", "dir"]:
         path = arg_str if arg_str else current_dir
         path = os.path.normpath(path if path.startswith("/") else f"{current_dir}/{path}")
@@ -1117,7 +1126,7 @@ def process_command(cmd, current_dir, username, fs, client_ip, session_id, sessi
                 break
             trigger_alert(session_id, "Vim Input", f"Input: {vim_input}", client_ip, username)
         chan.send(b"\r\n")
-        return "", new_dir, jobs, cmd_count
+        return "", new_dir, jobs, cmd_count, False
     elif cmd_name == "nano":
         chan.send(b"Entering nano mode... Press Ctrl+D to exit\r\n")
         while True:
@@ -1126,7 +1135,7 @@ def process_command(cmd, current_dir, username, fs, client_ip, session_id, sessi
                 break
             trigger_alert(session_id, "Nano Input", f"Input: {nano_input}", client_ip, username)
         chan.send(b"\r\n")
-        return "", new_dir, jobs, cmd_count
+        return "", new_dir, jobs, cmd_count, False
     elif cmd_name == "backup_data":
         output = "Backing up data to /tmp/backup.tar.gz (simulated)..."
         fs["/tmp/backup.tar.gz"] = {"type": "file", "content": "Simulated backup data", "owner": username, "permissions": "rw-r--r--", "mtime": datetime.now().strftime("%Y-%m-%d %H:%M:%S")}
@@ -1196,339 +1205,304 @@ def process_command(cmd, current_dir, username, fs, client_ip, session_id, sessi
         output = "logout"
         chan.send(b"logout\r\n")
         chan.close()
-        trigger_alert(session_id, "Session Ended", "User logged out", client_ip, username)
+        trigger_alert(session_id,        "Session Exit", "User logged out", client_ip, username)
         return output, new_dir, jobs, cmd_count, True
-    elif cmd_name == "ps":
-        output = get_dynamic_ps()
-        trigger_alert(session_id, "Command Executed", "Displayed process list", client_ip, username)
-    elif cmd_name == "netstat":
-        output = get_dynamic_netstat()
-        trigger_alert(session_id, "Command Executed", "Displayed network connections", client_ip, username)
-    elif cmd_name == "dmesg":
-        output = get_dynamic_dmesg()
-        trigger_alert(session_id, "Command Executed", "Displayed kernel messages", client_ip, username)
-    elif cmd_name == "df":
-        output = get_dynamic_df()
-        trigger_alert(session_id, "Command Executed", "Displayed disk usage", client_ip, username)
-    elif cmd_name == "uptime":
-        output = get_dynamic_uptime()
-        trigger_alert(session_id, "Command Executed", "Displayed system uptime", client_ip, username)
-    elif cmd_name == "ftp":
-        host = arg_str if arg_str else "localhost"
-        trigger_alert(session_id, "FTP Session", f"Started ftp to {host}", client_ip, username)
-        ftp_session(chan, host, username, session_id, client_ip, session_log)
-    elif cmd_name == "definecmd" and len(cmd_parts) > 1:
-        USER_DEFINED_COMMANDS.add(cmd_parts[1])
-        output = f"Registered command '{cmd_parts[1]}'"
+    elif cmd_name in USER_DEFINED_COMMANDS:
+        output = f"{cmd_name}: custom command executed (simulated output)"
+        trigger_alert(session_id, "Custom Command", f"Executed custom command: {cmd}", client_ip, username)
     else:
         output = f"{cmd_name}: command not found"
-        USER_DEFINED_COMMANDS.add(cmd_name)
         trigger_alert(session_id, "Unknown Command", f"Attempted unknown command: {cmd}", client_ip, username)
+    
     cmd_count += 1
     if cmd_count >= CMD_LIMIT_PER_SESSION:
-        output += "\nSession command limit reached. Terminating session."
-        chan.send(b"Session command limit reached. Terminating session.\r\n")
+        output += "\nCommand limit reached for this session."
+        trigger_alert(session_id, "Command Limit Exceeded", f"Reached {CMD_LIMIT_PER_SESSION} commands", client_ip, username)
+        chan.send(b"Command limit reached. Session terminated.\r\n")
         chan.close()
-        trigger_alert(session_id, "Session Limit Reached", "Session terminated due to command limit", client_ip, username)
         return output, new_dir, jobs, cmd_count, True
+    
     return output, new_dir, jobs, cmd_count, False
 
-# Lecture de ligne avancée
+# Lecture interactive des lignes avec autocomplétion
 def read_line_advanced(chan, prompt, history, current_dir, username, fs, session_log, session_id, client_ip, jobs, cmd_count):
     chan.send(prompt.encode())
-    current_input = ""
+    buffer = ""
+    pos = 0
     history_index = len(history)
-    cursor_pos = 0
     while True:
-        if not chan.recv_ready():
-            time.sleep(0.1)
-            continue
-        data = chan.recv(1024)
-        if not data:
-            return "", jobs, cmd_count
-        for char in data.decode('utf-8', errors='ignore'):
-            if char == '\r' or char == '\n':
-                chan.send(b"\r\n")
-                if current_input.strip():
-                    history.append(current_input)
-                return current_input, jobs, cmd_count
-            elif char == '\t':
-                current_input = autocomplete(current_input, current_dir, username, fs, chan, history)
-                chan.send(b"\r" + b" " * 100 + b"\r" + prompt.encode() + current_input.encode())
-                cursor_pos = len(current_input)
-            elif char == '\x7f' or char == '\b':
-                if cursor_pos > 0:
-                    current_input = current_input[:cursor_pos-1] + current_input[cursor_pos:]
-                    cursor_pos -= 1
-                    chan.send(b"\b \b" + current_input[cursor_pos:].encode() + b" " + b"\b" * (len(current_input[cursor_pos:]) + 1))
-            elif char == '\x03':  # Ctrl+C
-                chan.send(b"^C\r\n")
-                current_input = ""
-                cursor_pos = 0
-                chan.send(prompt.encode())
-            elif ord(char) == 27:  # Escape sequence (arrows)
-                if chan.recv_ready():
-                    next_chars = chan.recv(2).decode('utf-8', errors='ignore')
-                    if next_chars == "[A" and history_index > 0:  # Up arrow
+        readable, _, _ = select.select([chan], [], [], 0.1)
+        if readable:
+            try:
+                data = chan.recv(1).decode('utf-8', errors='ignore')
+                if not data:
+                    return "", jobs, cmd_count
+                log_activity(session_id, client_ip, username, data)
+                
+                if data == '\r' or data == '\n':
+                    chan.send(b"\r\n")
+                    if buffer.strip():
+                        history.append(buffer.strip())
+                    return buffer.strip(), jobs, cmd_count
+                elif data == '\t':
+                    buffer = autocomplete(buffer, current_dir, username, fs, chan, history)
+                    chan.send(b"\r" + b" " * 100 + b"\r" + prompt.encode() + buffer.encode())
+                    pos = len(buffer)
+                elif data == '\x7f':  # Backspace
+                    if pos > 0:
+                        buffer = buffer[:pos-1] + buffer[pos:]
+                        pos -= 1
+                        chan.send(b"\b \b")
+                elif data == '\x03':  # Ctrl+C
+                    chan.send(b"^C\r\n")
+                    return "", jobs, cmd_count
+                elif data == '\x04':  # Ctrl+D
+                    chan.send(b"logout\r\n")
+                    return "exit", jobs, cmd_count
+                elif data in ['\x1b[A', '\x1b[B']:  # Up/Down arrow
+                    if data == '\x1b[A' and history_index > 0:
                         history_index -= 1
-                        current_input = history[history_index] if history_index < len(history) else ""
-                        cursor_pos = len(current_input)
-                        chan.send(b"\r" + b" " * 100 + b"\r" + prompt.encode() + current_input.encode())
-                    elif next_chars == "[B" and history_index < len(history) - 1:  # Down arrow
+                    elif data == '\x1b[B' and history_index < len(history):
                         history_index += 1
-                        current_input = history[history_index] if history_index < len(history) else ""
-                        cursor_pos = len(current_input)
-                        chan.send(b"\r" + b" " * 100 + b"\r" + prompt.encode() + current_input.encode())
-                    elif next_chars == "[D" and cursor_pos > 0:  # Left arrow
-                        cursor_pos -= 1
-                        chan.send(b"\b")
-                    elif next_chars == "[C" and cursor_pos < len(current_input):  # Right arrow
-                        cursor_pos += 1
-                        chan.send(b"\033[C")
-            elif char in string.printable:
-                current_input = current_input[:cursor_pos] + char + current_input[cursor_pos:]
-                cursor_pos += 1
-                chan.send((char + current_input[cursor_pos:]).encode() + b"\b" * len(current_input[cursor_pos:]))
-            log_activity(session_id, client_ip, username, char)
+                    buffer = history[history_index] if 0 <= history_index < len(history) else ""
+                    chan.send(b"\r" + b" " * 100 + b"\r" + prompt.encode() + buffer.encode())
+                    pos = len(buffer)
+                elif data in ['\x1b[D', '\x1b[C']:  # Left/Right arrow
+                    if data == '\x1b[D' and pos > 0:
+                        pos -= 1
+                        chan.send(b"\x1b[D")
+                    elif data == '\x1b[C' and pos < len(buffer):
+                        pos += 1
+                        chan.send(b"\x1b[C")
+                elif len(data) == 1 and ord(data) >= 32:
+                    buffer = buffer[:pos] + data + buffer[pos:]
+                    pos += 1
+                    chan.send(data.encode())
+            except UnicodeDecodeError:
+                continue
+            except socket.timeout:
+                continue
+            except Exception as e:
+                print(f"[!] Read line error: {e}")
+                return "", jobs, cmd_count
 
+# Lecture du mot de passe
 def read_password(chan):
-    password = ""
+    buffer = ""
     while True:
-        if not chan.recv_ready():
-            time.sleep(0.1)
-            continue
-        char = chan.recv(1).decode('utf-8', errors='ignore')
-        if not char:
-            return ""
-        if char in ['\r', '\n']:
-            chan.send(b"\r\n")
-            break
-        elif char in ['\x7f', '\b']:
-            if password:
-                password = password[:-1]
-        else:
-            password += char
-    return password
+        readable, _, _ = select.select([chan], [], [], 0.1)
+        if readable:
+            try:
+                data = chan.recv(1).decode('utf-8', errors='ignore')
+                if data == '\r' or data == '\n':
+                    chan.send(b"\r\n")
+                    return buffer
+                elif data == '\x7f' and buffer:
+                    buffer = buffer[:-1]
+                    chan.send(b"\b \b")
+                elif len(data) == 1 and ord(data) >= 32:
+                    buffer += data
+                    chan.send(b"*")
+            except UnicodeDecodeError:
+                continue
+            except socket.timeout:
+                continue
+            except Exception as e:
+                print(f"[!] Read password error: {e}")
+                return ""
 
-# Gestion des connexions
-def handle_connection(client, addr, server_key):
-    client_ip = addr[0]
-    session_id = uuid.uuid4().int
-    with _connection_lock:
-        _connection_count[client_ip] = _connection_count.get(client_ip, 0) + 1
-        if _connection_count[client_ip] > CONNECTION_LIMIT_PER_IP:
-            print(f"[!] Connection limit exceeded for {client_ip}")
-            client.close()
-            return
-
+# Gestion de la session SSH
+def handle_ssh_session(chan, client_ip, username, session_id, transport):
+    session_log = []
+    current_dir = PREDEFINED_USERS.get(username, {}).get("home", "/home/" + username)
+    history = load_history(username)
+    jobs = []
+    cmd_count = 0
+    chan.settimeout(0.1)
+    
     try:
-        transport = paramiko.Transport(client)
-        transport.add_server_key(server_key)
-        transport.set_subsystem_handler('sftp', paramiko.SFTPServer, HoneypotSFTPServer)
-        server = HoneypotSSHServer(client_ip, session_id)
-        transport.start_server(server=server)
-        chan = transport.accept(20)
-        if chan is None:
-            print(f"[!] No channel for {client_ip}")
-            transport.close()
-            return
-
-        username = server.username
-        if not username:
-            transport.close()
-            return
-
-        trigger_alert(session_id, "Connection Established", f"New session started", client_ip, username)
-        chan.send(f"Welcome to Ubuntu 20.04.3 LTS (GNU/Linux 5.15.0-73-generic x86_64)\r\n\r\n".encode())
-        current_dir = PREDEFINED_USERS.get(username, {"home": f"/home/{username}"}).get("home", "/home")
-        session_log = []
-        history = load_history(username)
-        jobs = []
-        cmd_count = 0
-
         while True:
-            prompt_str = color_prompt(username, client_ip, current_dir)
-            input_line, jobs, cmd_count = read_line_advanced(
-                chan,
-                prompt_str,
-                history,
-                current_dir,
-                username,
-                FS,
-                session_log,
-                session_id,
-                client_ip,
-                jobs,
-                cmd_count,
+            prompt = color_prompt(username, client_ip, current_dir)
+            cmd, jobs, cmd_count = read_line_advanced(
+                chan, prompt, history, current_dir, username, FS, session_log,
+                session_id, client_ip, jobs, cmd_count
             )
-            if not input_line:  # Vérifie si la connexion est interrompue
+            if not cmd or cmd == "exit":
                 break
-            output, current_dir, jobs, cmd_count, terminate = process_command(input_line, current_dir, username, FS, client_ip, session_id, session_log, history, chan, jobs, cmd_count)
-            if terminate:
-                break
+            
+            output, current_dir, jobs, cmd_count, should_exit = process_command(
+                cmd, current_dir, username, FS, client_ip, session_id, session_log,
+                history, chan, jobs, cmd_count
+            )
             if output:
                 chan.send((output + "\r\n").encode())
-
-        save_history(username, history)
-        with _connection_lock:
-            _connection_count[client_ip] -= 1
-        trigger_alert(session_id, "Session Terminated", "Session ended", client_ip, username)
-        if SESSION_LOG_DIR:
-            os.makedirs(SESSION_LOG_DIR, exist_ok=True)
-            log_path = os.path.join(SESSION_LOG_DIR, f"{session_id}.log")
-            with open(log_path, "w") as f:
-                f.write("\n".join(session_log))
-            with open(log_path, "rb") as f_in, gzip.open(log_path + ".gz", "wb") as f_out:
-                shutil.copyfileobj(f_in, f_out)
-            os.remove(log_path)
-        transport.close()
+            if should_exit:
+                break
+            
+            save_history(username, history)
+            
     except Exception as e:
-        print(f"[!] Error in handle_connection: {e}")
-        trigger_alert(session_id, "Connection Error", str(e), client_ip, username)
+        print(f"[!] Session error: {e}")
     finally:
-        try:
-            client.close()
-        except:
-            pass  # Évite l'erreur "Bad file descriptor" si déjà fermé
+        chan.close()
+        transport.close()
+        save_session_log(session_id, session_log)
+        trigger_alert(session_id, "Session Closed", "Session terminated", client_ip, username)
 
-# Serveur SSH personnalisé
-class HoneypotSSHServer(paramiko.ServerInterface):
+def save_session_log(session_id, session_log):
+    os.makedirs(SESSION_LOG_DIR, exist_ok=True)
+    log_file = os.path.join(SESSION_LOG_DIR, f"session_{session_id}.log")
+    with open(log_file, "w") as f:
+        f.write("\n".join(session_log))
+    with open(log_file, "rb") as f_in:
+        with gzip.open(log_file + ".gz", "wb") as f_out:
+            shutil.copyfileobj(f_in, f_out)
+    os.remove(log_file)
+
+# Classe de transport Paramiko
+class HoneySSHServer(paramiko.ServerInterface):
     def __init__(self, client_ip, session_id):
         self.client_ip = client_ip
         self.session_id = session_id
-        self.username = None
-        self.password = None
         self.event = threading.Event()
-
+    
     def check_channel_request(self, kind, chanid):
         if kind == "session":
             return paramiko.OPEN_SUCCEEDED
         return paramiko.OPEN_FAILED_ADMINISTRATIVELY_PROHIBITED
-
+    
     def check_auth_password(self, username, password):
-        self.username = username
-        self.password = password
+        timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        success = False
+        redirected = False
+        
         if not check_bruteforce(self.client_ip, username, password):
+            print(f"[!] Bruteforce detected from {self.client_ip}")
             return paramiko.AUTH_FAILED
+        
+        hashed_password = hashlib.sha256(password.encode()).hexdigest()
+        if username in PREDEFINED_USERS and hashed_password == PREDEFINED_USERS[username]["password"]:
+            success = True
+            if ENABLE_REDIRECTION:
+                try:
+                    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
+                        sock.connect((REAL_SSH_HOST, REAL_SSH_PORT))
+                        redirected = True
+                except Exception:
+                    pass
+        
         try:
             with sqlite3.connect(DB_NAME, uri=True) as conn:
                 conn.execute(
                     "INSERT INTO login_attempts (timestamp, ip, username, password, success, redirected) VALUES (?, ?, ?, ?, ?, ?)",
-                    (datetime.now().strftime("%Y-%m-%d %H:%M:%S"), self.client_ip, username, password, 0, 0)
+                    (timestamp, self.client_ip, username, password, 1 if success else 0, 1 if redirected else 0)
                 )
         except sqlite3.Error as e:
-            print(f"[!] Login DB error: {e}")
-        if username in PREDEFINED_USERS and hashlib.sha256(password.encode()).hexdigest() == PREDEFINED_USERS[username]["password"]:
-            try:
-                with sqlite3.connect(DB_NAME, uri=True) as conn:
-                    conn.execute(
-                        "UPDATE login_attempts SET success = 1 WHERE ip = ? AND username = ? AND timestamp = (SELECT MAX(timestamp) FROM login_attempts WHERE ip = ? AND username = ?)",
-                        (self.client_ip, username, self.client_ip, username)
-                    )
-            except sqlite3.Error as e:
-                print(f"[!] Login update error: {e}")
-            trigger_alert(self.session_id, "Successful Login", f"User {username} logged in", self.client_ip, username)
+            print(f"[!] Login attempt logging error: {e}")
+        
+        trigger_alert(self.session_id, "Login Attempt",
+                     f"{'Successful' if success else 'Failed'} login: {username} from {self.client_ip}",
+                     self.client_ip, username)
+        
+        if success and not redirected:
             return paramiko.AUTH_SUCCESSFUL
-        trigger_alert(self.session_id, "Failed Login", f"Failed login attempt for {username}", self.client_ip, username)
         return paramiko.AUTH_FAILED
-
-    def check_channel_exec_request(self, channel, command):
-        return False
-
-    def get_allowed_auths(self, username):
-        return "password"
-
-    def check_auth_publickey(self, username, key):
-        return paramiko.AUTH_FAILED
-
-    def check_auth_gssapi_with_mic(self, username, gss_server):
-        return paramiko.AUTH_FAILED
-
-    def enable_auth_gssapi(self):
-        return False
-
-    def check_channel_pty_request(self, channel, term, width, height, pixelwidth, pixelheight, modes):
-        return True
-
+    
     def check_channel_shell_request(self, channel):
         self.event.set()
         return True
+    
+    def check_channel_pty_request(self, channel, term, width, height, pixelwidth, pixelheight, modes):
+        return True
 
-    def check_channel_direct_tcpip_request(self, chanid, origin, destination):
-        detect_port_scan(self.client_ip, destination[1])
-        return paramiko.OPEN_FAILED_ADMINISTRATIVELY_PROHIBITED
-
-# Serveur SFTP personnalisé
-class HoneypotSFTPServer(paramiko.SFTPServerInterface):
-    def __init__(self, server):
-        self.server = server
-        self.fs = FS
-
-    def list_folder(self, path):
-        path = os.path.normpath(path if path.startswith("/") else f"/{path}")
-        if path not in self.fs or self.fs[path]["type"] != "dir" or "contents" not in self.fs[path]:
-            return paramiko.SFTP_NO_SUCH_FILE
-        return [(f, {}, {}) for f in self.fs[path]["contents"]]
-
-    def stat(self, path):
-        path = os.path.normpath(path if path.startswith("/") else f"/{path}")
-        if path not in self.fs:
-            return paramiko.SFTP_NO_SUCH_FILE
-        attrs = paramiko.SFTPAttributes()
-        attrs.st_size = len(self.fs[path].get("content", "")) if self.fs[path]["type"] == "file" and not callable(self.fs[path].get("content")) else 0
-        attrs.st_uid = PREDEFINED_USERS.get(self.server.username, {"uid": 1000})["uid"]
-        attrs.st_gid = 1000
-        attrs.st_mode = (0o100755 if self.fs[path]["type"] == "dir" else 0o100644) | (0o0400 if "r" in self.fs[path].get("permissions", "rw-r--r--") else 0) | (0o0200 if "w" in self.fs[path].get("permissions", "") else 0) | (0o0100 if "x" in self.fs[path].get("permissions", "") else 0)
-        attrs.st_atime = attrs.st_mtime = time.mktime(datetime.strptime(self.fs[path].get("mtime", datetime.now().strftime("%Y-%m-%d %H:%M:%S")), "%Y-%m-%d %H:%M:%S").timetuple())
-        return attrs
-
-    def open(self, path, flags, attr):
-        path = os.path.normpath(path if path.startswith("/") else f"/{path}")
-        if path not in self.fs or self.fs[path]["type"] != "file":
-            return paramiko.SFTP_NO_SUCH_FILE
-        trigger_alert(self.server.session_id, "SFTP Access", f"Accessed file via SFTP: {path}", self.server.client_ip, self.server.username)
-        return StringIO(self.fs[path]["content"]() if callable(self.fs[path]["content"]) else self.fs[path]["content"])
-
-    def remove(self, path):
-        path = os.path.normpath(path if path.startswith("/") else f"/{path}")
-        if path in self.fs and self.fs[path]["type"] == "file":
-            parent_dir = "/".join(path.split("/")[:-1]) or "/"
-            if parent_dir in self.fs and "contents" in self.fs[parent_dir] and path.split("/")[-1] in self.fs[parent_dir]["contents"]:
-                self.fs[parent_dir]["contents"].remove(path.split("/")[-1])
-            del self.fs[path]
-            save_filesystem(self.fs)
-            trigger_alert(self.server.session_id, "SFTP Delete", f"Deleted file via SFTP: {path}", self.server.client_ip, self.server.username)
-            return paramiko.SFTP_OK
-        return paramiko.SFTP_NO_SUCH_FILE
-
-# Lancement du serveur
-def signal_handler(signum, frame):
-    print("[!] Shutting down server...")
-    sys.exit(0)
-
-signal.signal(signal.SIGINT, signal_handler)
-signal.signal(signal.SIGTERM, signal_handler)
-
-if __name__ == "__main__":
+# Serveur principal
+def start_server():
     init_database()
-    server_key = paramiko.RSAKey.generate(2048)
-    server = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-    server.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-    server.bind((HOST, PORT))
-    server.listen(100)
-    print(f"[*] SSH Honeypot listening on {HOST}:{PORT}")
-
+    
+    server_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    server_socket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+    server_socket.bind((HOST, PORT))
+    server_socket.listen(100)
+    print(f"[*] Listening on {HOST}:{PORT}")
+    
+    # Charger les clés SSH
+    host_key = paramiko.RSAKey.generate(2048)
+    
+    # Lancer les threads de maintenance
     threading.Thread(target=cleanup_bruteforce_attempts, daemon=True).start()
     threading.Thread(target=send_weekly_report, daemon=True).start()
     threading.Thread(target=send_periodic_report, daemon=True).start()
     threading.Thread(target=cleanup_trap_files, args=(FS,), daemon=True).start()
-
+    
+    executor = ThreadPoolExecutor(max_workers=50)
+    
+    def handle_connection(client, addr):
+        client_ip = addr[0]
+        with _connection_lock:
+            _connection_count[client_ip] = _connection_count.get(client_ip, 0) + 1
+            if _connection_count[client_ip] > CONNECTION_LIMIT_PER_IP:
+                print(f"[!] Connection limit exceeded for {client_ip}")
+                client.close()
+                return
+        
+        session_id = uuid.uuid4().int
+        print(f"[*] New connection from {client_ip}, session {session_id}")
+        
+        try:
+            transport = paramiko.Transport(client)
+            transport.add_server_key(host_key)
+            transport.set_subsystem_handler("sftp", paramiko.SFTPServer, paramiko.SFTPServerInterface)
+            
+            server = HoneySSHServer(client_ip, session_id)
+            transport.start_server(server=server)
+            
+            chan = transport.accept(20)
+            if chan is None:
+                print(f"[!] No channel for {client_ip}")
+                transport.close()
+                return
+            
+            server.event.wait(10)
+            if not server.event.is_set():
+                print(f"[!] Client {client_ip} did not request shell")
+                chan.close()
+                transport.close()
+                return
+            
+            username = transport.get_username() or "unknown"
+            detect_port_scan(client_ip, PORT)
+            handle_ssh_session(chan, client_ip, username, session_id, transport)
+            
+        except Exception as e:
+            print(f"[!] Connection error from {client_ip}: {e}")
+        finally:
+            with _connection_lock:
+                _connection_count[client_ip] = _connection_count.get(client_ip, 0) - 1
+                if _connection_count[client_ip] == 0:
+                    del _connection_count[client_ip]
+            client.close()
+    
+    def signal_handler(sig, frame):
+        print("\n[*] Shutting down server...")
+        server_socket.close()
+        DB_CONN.close()
+        FS_CONN.close()
+        sys.exit(0)
+    
+    signal.signal(signal.SIGINT, signal_handler)
+    
     while True:
         try:
-            client, addr = server.accept()
-            threading.Thread(target=handle_connection, args=(client, addr, server_key), daemon=True).start()
+            client, addr = server_socket.accept()
+            executor.submit(handle_connection, client, addr)
         except KeyboardInterrupt:
             break
         except Exception as e:
             print(f"[!] Server error: {e}")
-    server.close()
+    
+    server_socket.close()
+    DB_CONN.close()
+    FS_CONN.close()
+
+if __name__ == "__main__":
+    start_server()
