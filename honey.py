@@ -9,6 +9,10 @@ import re
 import os
 import smtplib
 import json
+import logging
+from logging.handlers import RotatingFileHandler
+import gzip
+import shutil
 from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
 from email.mime.application import MIMEApplication
@@ -46,7 +50,32 @@ _brute_force_lock = threading.Lock()
 _connection_count = {}  # {ip: count}
 _connection_lock = threading.Lock()
 
-SESSION_LOG_DIR = None  # Désactivé car pas de logs fichiers
+SESSION_LOG_DIR = "session_logs"
+LOG_DIR = "logs"
+LOG_FILE = os.path.join(LOG_DIR, "honey.log")
+
+USER_DEFINED_COMMANDS = set()
+
+class JsonFormatter(logging.Formatter):
+    def format(self, record):
+        log_record = {
+            "timestamp": datetime.utcfromtimestamp(record.created).isoformat(),
+            "level": record.levelname,
+            "message": record.getMessage(),
+        }
+        return json.dumps(log_record)
+
+
+def setup_logging():
+    os.makedirs(LOG_DIR, exist_ok=True)
+    handler = RotatingFileHandler(LOG_FILE, maxBytes=10240, backupCount=5)
+    handler.setFormatter(JsonFormatter())
+    logger = logging.getLogger("honey")
+    logger.setLevel(logging.INFO)
+    logger.addHandler(handler)
+    return logger
+
+LOGGER = setup_logging()
 
 FAKE_SERVICES = {
     "ftp": 21,
@@ -410,7 +439,40 @@ if not FS:
 
 # Autocomplétion
 def get_completions(current_input, current_dir, username, fs, history):
-    base_cmds = list(COMMAND_OPTIONS.keys()) + ["whoami", "id", "uname", "pwd", "exit", "history", "sudo", "su", "curl", "wget", "telnet", "ping", "nmap", "arp", "scp", "sftp", "who", "w", "touch", "rm", "mkdir", "rmdir", "cp", "mv", "vim", "nano", "backup_data", "systemctl", "fg", "app_status", "status_report", "jobs"]
+    base_cmds = list(COMMAND_OPTIONS.keys()) + list(USER_DEFINED_COMMANDS) + [
+        "whoami",
+        "id",
+        "uname",
+        "pwd",
+        "exit",
+        "history",
+        "sudo",
+        "su",
+        "curl",
+        "wget",
+        "telnet",
+        "ping",
+        "nmap",
+        "arp",
+        "scp",
+        "sftp",
+        "who",
+        "w",
+        "touch",
+        "rm",
+        "mkdir",
+        "rmdir",
+        "cp",
+        "mv",
+        "vim",
+        "nano",
+        "backup_data",
+        "systemctl",
+        "fg",
+        "app_status",
+        "status_report",
+        "jobs",
+    ]
     if not current_input.strip():
         return sorted(base_cmds)
     parts = current_input.strip().split()
@@ -502,10 +564,29 @@ def trigger_alert(session_id, event_type, details, client_ip, username):
 
 def log_activity(session_id, client_ip, username, key):
     timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S.%f")
+    log_entry = {
+        "event": "keypress",
+        "time": timestamp,
+        "session": session_id,
+        "ip": client_ip,
+        "user": username,
+        "key": key,
+    }
+    LOGGER.info(json.dumps(log_entry))
     print(f"[ACTIVITY] {timestamp},{session_id},{client_ip},{username},{key}")
 
 def log_session_activity(session_id, client_ip, username, command_line, output):
     timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    log_entry = {
+        "event": "command",
+        "time": timestamp,
+        "session": session_id,
+        "ip": client_ip,
+        "user": username,
+        "command": command_line,
+        "output": output,
+    }
+    LOGGER.info(json.dumps(log_entry))
     print(f"[SESSION] {timestamp}|{client_ip}|{username}|{command_line}|{output}")
 
 # Détection de bruteforce
@@ -683,6 +764,30 @@ def cleanup_trap_files(fs):
         time.sleep(3600)
 
 # Traitement des commandes
+def ftp_session(chan, host, username, session_id, client_ip, session_log):
+    history = []
+    jobs = []
+    cmd_count = 0
+    chan.send(f"Connected to {host}.\r\n220 (vsFTPd 3.0.3)\r\nName ({host}:{username}): ".encode())
+    _, _, _ = read_line_advanced(chan, "", history, "", username, FS, session_log, session_id, client_ip, jobs, cmd_count)
+    chan.send(b"331 Please specify the password.\r\nPassword: ")
+    _, _, _ = read_line_advanced(chan, "", history, "", username, FS, session_log, session_id, client_ip, jobs, cmd_count)
+    chan.send(b"230 Login successful.\r\nftp> ")
+    while True:
+        ftp_cmd, _, _ = read_line_advanced(chan, "ftp> ", history, "", username, FS, session_log, session_id, client_ip, jobs, cmd_count)
+        if not ftp_cmd or ftp_cmd.strip().lower() in ["quit", "exit", "bye"]:
+            chan.send(b"221 Goodbye.\r\n")
+            break
+        elif ftp_cmd.strip().lower() == "ls":
+            chan.send(b"200 Here comes the directory listing.\r\n")
+            chan.send(b"-rw-r--r-- 1 user group 0 Jan 01 00:00 file.txt\r\n")
+        elif ftp_cmd.strip().lower().startswith("get") or ftp_cmd.strip().lower().startswith("put"):
+            chan.send(b"200 Command okay.\r\n")
+        else:
+            chan.send(b"502 Command not implemented.\r\n")
+    session_log.append(f"FTP session to {host} closed")
+
+
 def process_command(cmd, current_dir, username, fs, client_ip, session_id, session_log, command_history, chan, jobs=None, cmd_count=0):
     if not cmd.strip():
         return "", current_dir, jobs or [], cmd_count
@@ -1056,8 +1161,16 @@ def process_command(cmd, current_dir, username, fs, client_ip, session_id, sessi
         output = "\n".join(f"{i+1}  {cmd}" for i, cmd in enumerate(command_history))
         trigger_alert(session_id, "Command History", "Displayed command history", client_ip, username)
     elif cmd_name == "sudo":
-        output = f"sudo: {arg_str}: command not found"
+        attempts = 0
+        while attempts < 3:
+            chan.send(f"[sudo] password for {username}: ".encode())
+            _ = read_password(chan)
+            attempts += 1
+            if attempts < 3:
+                chan.send(b"Sorry, try again.\r\n")
+        chan.send(b"sudo: 3 incorrect password attempts\r\n")
         trigger_alert(session_id, "Sudo Attempt", f"Attempted sudo command: {arg_str}", client_ip, username)
+        output = ""
     elif cmd_name == "su":
         output = "su: Authentication failure"
         trigger_alert(session_id, "SU Attempt", "Attempted su command", client_ip, username)
@@ -1082,8 +1195,16 @@ def process_command(cmd, current_dir, username, fs, client_ip, session_id, sessi
     elif cmd_name == "uptime":
         output = get_dynamic_uptime()
         trigger_alert(session_id, "Command Executed", "Displayed system uptime", client_ip, username)
+    elif cmd_name == "ftp":
+        host = arg_str if arg_str else "localhost"
+        trigger_alert(session_id, "FTP Session", f"Started ftp to {host}", client_ip, username)
+        ftp_session(chan, host, username, session_id, client_ip, session_log)
+    elif cmd_name == "definecmd" and len(cmd_parts) > 1:
+        USER_DEFINED_COMMANDS.add(cmd_parts[1])
+        output = f"Registered command '{cmd_parts[1]}'"
     else:
         output = f"{cmd_name}: command not found"
+        USER_DEFINED_COMMANDS.add(cmd_name)
         trigger_alert(session_id, "Unknown Command", f"Attempted unknown command: {cmd}", client_ip, username)
     cmd_count += 1
     if cmd_count >= CMD_LIMIT_PER_SESSION:
@@ -1152,6 +1273,25 @@ def read_line_advanced(chan, prompt, history, current_dir, username, fs, session
                 chan.send((char + current_input[cursor_pos:]).encode() + b"\b" * len(current_input[cursor_pos:]))
             log_activity(session_id, client_ip, username, char)
 
+def read_password(chan):
+    password = ""
+    while True:
+        if not chan.recv_ready():
+            time.sleep(0.1)
+            continue
+        char = chan.recv(1).decode('utf-8', errors='ignore')
+        if not char:
+            return ""
+        if char in ['\r', '\n']:
+            chan.send(b"\r\n")
+            break
+        elif char in ['\x7f', '\b']:
+            if password:
+                password = password[:-1]
+        else:
+            password += char
+    return password
+
 # Gestion des connexions
 def handle_connection(client, addr, server_key):
     client_ip = addr[0]
@@ -1184,7 +1324,7 @@ def handle_connection(client, addr, server_key):
         chan.send(f"Welcome to Ubuntu 20.04.3 LTS (GNU/Linux 5.15.0-73-generic x86_64)\r\n\r\n".encode())
         current_dir = PREDEFINED_USERS.get(username, {"home": f"/home/{username}"}).get("home", "/home")
         session_log = []
-        history =        history = load_history(username)
+        history = load_history(username)
         jobs = []
         cmd_count = 0
 
@@ -1215,6 +1355,14 @@ def handle_connection(client, addr, server_key):
         with _connection_lock:
             _connection_count[client_ip] -= 1
         trigger_alert(session_id, "Session Terminated", "Session ended", client_ip, username)
+        if SESSION_LOG_DIR:
+            os.makedirs(SESSION_LOG_DIR, exist_ok=True)
+            log_path = os.path.join(SESSION_LOG_DIR, f"{session_id}.log")
+            with open(log_path, "w") as f:
+                f.write("\n".join(session_log))
+            with open(log_path, "rb") as f_in, gzip.open(log_path + ".gz", "wb") as f_out:
+                shutil.copyfileobj(f_in, f_out)
+            os.remove(log_path)
         transport.close()
     except Exception as e:
         print(f"[!] Error in handle_connection: {e}")
