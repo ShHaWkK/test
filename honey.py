@@ -22,51 +22,31 @@ from concurrent.futures import ThreadPoolExecutor
 from functools import lru_cache
 import hashlib
 import string
-import termios
-import tty
 import ipapi
 from io import StringIO
-import logging
 
-# Configuration du logging avancé
-logging.basicConfig(
-    level=logging.INFO,
-    format='%(asctime)s - %(levelname)s - %(message)s - IP: %(client_ip)s - Session ID: %(session_id)s',
-    handlers=[
-        logging.FileHandler('honeypot.log'),
-        logging.StreamHandler()
-    ]
-)
-logger = logging.getLogger(__name__)
-
+# Désactivation des logs dans les fichiers (géré en mémoire via alertes)
 # Configuration
-HOST = ""
-PORT = 2224
-SFTP_PORT = 2225
+HOST = ""  # Écoute sur toutes les interfaces
+PORT = 2224  # Port personnalisé
 SSH_BANNER = "SSH-2.0-OpenSSH_8.9p1 Ubuntu-3ubuntu0.1"
 ENABLE_REDIRECTION = False
 REAL_SSH_HOST = "192.168.1.100"
 REAL_SSH_PORT = 22
 
-DB_NAME = "honeypot.db"
-FS_DB = "filesystem.db"
+DB_NAME = ":memory:"  # Base en mémoire
+FS_DB = ":memory:"    # Base en mémoire pour le système de fichiers
 BRUTE_FORCE_THRESHOLD = 5
-BRUTE_FORCE_WINDOW = 300
+BRUTE_FORCE_WINDOW = 300  # 5 minutes
 CMD_LIMIT_PER_SESSION = 50
 CONNECTION_LIMIT_PER_IP = 10
-PORT_SCAN_THRESHOLD = 10  # Nombre de connexions suspectes par minute
-TRAP_CLEANUP_INTERVAL = 86400  # 24 heures en secondes
-RISK_SCORE_THRESHOLD = 50  # Seuil d'alerte de score de risque
-_risk_scores = {}  # Score de risque par session IP
-_brute_force_attempts = {}  # Suivi des tentatives de force brute
-_brute_force_alerted = set()  # Suivi des IPs alertées pour force brute
+_brute_force_attempts = {}  # {ip: [(timestamp, username, password)]}
+_brute_force_alerted = set()
 _brute_force_lock = threading.Lock()
-_connection_count = {}
+_connection_count = {}  # {ip: count}
 _connection_lock = threading.Lock()
-fs_lock = threading.Lock()
-_scan_attempts = {}  # Tentatives de scan de port par IP
 
-SESSION_LOG_DIR = None
+SESSION_LOG_DIR = None  # Désactivé car pas de logs fichiers
 
 FAKE_SERVICES = {
     "ftp": 21,
@@ -75,6 +55,7 @@ FAKE_SERVICES = {
     "telnet": 23,
 }
 
+# Identifiants SMTP via variables d'environnement
 SMTP_HOST = os.getenv("SMTP_HOST", "smtp.gmail.com")
 SMTP_PORT = int(os.getenv("SMTP_PORT", 587))
 SMTP_USER = os.getenv("SMTP_USER", "honeycute896@gmail.com")
@@ -83,118 +64,238 @@ ALERT_FROM = SMTP_USER
 ALERT_TO = os.getenv("ALERT_TO", "alexandreuzan75@gmail.com")
 
 PREDEFINED_USERS = {
-    "admin": {"home": "/home/admin", "password": hashlib.sha256("admin123".encode()).hexdigest(), "uid": 1000, "groups": ["admin", "sudo"]},
-    "devops": {"home": "/home/devops", "password": hashlib.sha256("devops456".encode()).hexdigest(), "uid": 1001, "groups": ["devops"]},
-    "dbadmin": {"home": "/home/dbadmin", "password": hashlib.sha256("dbadmin789".encode()).hexdigest(), "uid": 1002, "groups": ["dbadmin"]},
-    "mysql": {"home": "/var/lib/mysql", "password": hashlib.sha256("mysql123".encode()).hexdigest(), "uid": 110, "groups": ["mysql"]},
-    "www-data": {"home": "/var/www", "password": hashlib.sha256("wwwdata123".encode()).hexdigest(), "uid": 33, "groups": ["www-data"]}
-}
-
-USER_FILES = {
     "admin": {
-        "credentials.txt": "admin:supersecret\n# Internal use only",
-        ".trap_credentials": "Trap file: access logged",
-        ".secret_key": "ssh-rsa AAAAB3NzaC1yc2E...admin_key",
-        "project_config": "projectA: sensitive data...",
-        "backup_pass.txt": "root:admin123\nbackup:backup456",
-        ".backup_log": "Backup completed at 2025-06-11 12:00"
+        "home": "/home/admin",
+        "password": hashlib.sha256("admin123".encode()).hexdigest(),
+        "files": {
+            "credentials.txt": "admin:supersecret\n# Internal use only",
+            "sshkey": "ssh-rsa AAAAB3NzaC1yc2E...admin_key",
+            "project_config": "projectA: sensitive data...",
+            "backup_pass.txt": "root:admin123\nbackup:backup456"
+        },
+        "uid": 1000,
+        "groups": ["admin", "sudo"]
     },
     "devops": {
-        "deploy_key": "ssh-rsa AAAAB3NzaC1yc2E...devops_key",
-        "jenkins.yml": "jenkins: {url: [invalid url, do not cite] user: admin, pass: admin123}",
-        ".bashrc": "alias ll='ls -la'\nexport PATH=$PATH:/usr/local/bin",
-        ".env": "DB_PASSWORD=devops789",
-        ".trap_config": "Trap file: access logged"
+        "home": "/home/devops",
+        "password": hashlib.sha256("devops456".encode()).hexdigest(),
+        "files": {
+            "deploy_key": "ssh-rsa AAAAB3NzaC1yc2E...devops_key",
+            "jenkins.yml": "jenkins: {url: http://localhost:8080, user: admin, pass: admin123}",
+            ".bashrc": "alias ll='ls -la'\nexport PATH=$PATH:/usr/local/bin"
+        },
+        "uid": 1001,
+        "groups": ["devops"]
     },
     "dbadmin": {
-        "backup.sql": "-- SQL dump\nDROP TABLE IF EXISTS users;",
-        "scripts.sh": "#!/bin/bash\necho 'DB maintenance...'",
-        "mysql_creds.txt": "mysql_user:root\nmysql_pass:password123",
-        ".db_log": "Database sync at 2025-06-12 09:00",
-        ".trap_db": "Trap file: access logged"
+        "home": "/home/dbadmin",
+        "password": hashlib.sha256("dbadmin789".encode()).hexdigest(),
+        "files": {
+            "backup.sql": "-- SQL dump\nDROP TABLE IF EXISTS users;",
+            "scripts.sh": "#!/bin/bash\necho 'DB maintenance...'",
+            "mysql_creds.txt": "mysql_user:root\nmysql_pass:password123"
+        },
+        "uid": 1002,
+        "groups": ["dbadmin"]
     },
     "mysql": {
-        ".mysql_config": "port=3306\nuser=root",
-        "data.bin": "Binary data placeholder",
-        ".trap_data": "Trap file: access logged"
+        "home": "/var/lib/mysql",
+        "password": hashlib.sha256("mysql123".encode()).hexdigest(),
+        "files": {},
+        "uid": 110,
+        "groups": ["mysql"]
     },
     "www-data": {
-        "config.php": "<?php define('DB_PASS', 'weakpass123'); ?>",
-        ".htaccess": "Deny from all",
-        "error.log": "Error: 404 at 2025-06-11 14:00",
-        ".trap_web": "Trap file: access logged"
+        "home": "/var/www",
+        "password": hashlib.sha256("wwwdata123".encode()).hexdigest(),
+        "files": {
+            "config.php": "<?php define('DB_PASS', 'weakpass123'); ?>"
+        },
+        "uid": 33,
+        "groups": ["www-data"]
     }
 }
 
+KEYSTROKES_LOG = None  # Désactivé
+FILE_TRANSFER_LOG = None  # Désactivé
 SENSITIVE_FILES = [
-    "/home/admin/credentials.txt", "/home/admin/backup_pass.txt", "/home/dbadmin/mysql_creds.txt",
-    "/var/www/config.php", "/tmp/suspicious.sh", "/home/admin/.hidden_config", "/var/lib/mysql/.mysql_config"
+    "/home/admin/credentials.txt",
+    "/home/admin/backup_pass.txt",
+    "/home/dbadmin/mysql_creds.txt",
+    "/var/www/config.php",
+    "/tmp/suspicious.sh"
 ]
 
 FAKE_NETWORK_HOSTS = {
     "192.168.1.10": {"name": "webserver.local", "services": ["http", "https"]},
     "192.168.1.20": {"name": "dbserver.local", "services": ["mysql"]},
-    "192.168.1.30": {"name": "backup.local", "services": ["ftp"]},
-    "8.8.8.8": {"name": "google-dns", "services": ["dns"]}
+    "192.168.1.30": {"name": "backup.local", "services": ["ftp"]}
 }
 
 COMMAND_OPTIONS = {
-    "ls": ["-l", "-a", "-la", "-lh", "--help"], "cat": ["-n", "--help"], "grep": ["-i", "-r", "-n", "--help"],
-    "find": ["-name", "-type", "-exec", "--help"], "chmod": ["-R", "+x", "755", "644", "--help"],
-    "chown": ["-R", "--help"], "service": ["start", "stop", "status", "restart"],
-    "systemctl": ["start", "stop", "status", "restart", "enable", "disable"], "ip": ["addr", "link", "route"],
-    "apt-get": ["update", "upgrade", "install", "remove"], "scp": ["-r", "-P"], "curl": ["-O", "-L", "--help"],
-    "wget": ["-O", "-q", "--help"], "telnet": [], "ping": ["-c", "-i"], "nmap": ["-sS", "-sV"], "who": [],
-    "w": [], "top": [], "df": ["-h"], "uptime": [], "ps": ["-aux"], "netstat": ["-tuln"], "dmesg": [],
-    "tree": [], "app_status": [], "status_report": [], "backup_data": []
+    "ls": ["-l", "-a", "-la", "-lh", "--help"],
+    "cat": ["-n", "--help"],
+    "grep": ["-i", "-r", "-n", "--help"],
+    "find": ["-name", "-type", "-exec", "--help"],
+    "chmod": ["-R", "+x", "755", "644", "--help"],
+    "chown": ["-R", "--help"],
+    "service": ["start", "stop", "status", "restart"],
+    "systemctl": ["start", "stop", "status", "restart", "enable", "disable"],
+    "ip": ["addr", "link", "route"],
+    "apt-get": ["update", "upgrade", "install", "remove"],
+    "scp": ["-r", "-P"],
+    "curl": ["-O", "-L", "--help"],
+    "wget": ["-O", "-q", "--help"],
+    "telnet": [],
+    "ping": ["-c", "-i"],
+    "nmap": ["-sS", "-sV"]
 }
 
-# Dynamic data generators
+# Données dynamiques
 @lru_cache(maxsize=10)
-def get_dynamic_df(): return f"Filesystem      Size  Used Avail Use% Mounted on\n/dev/sda1        50G   {random.randint(5,10)}G   {random.randint(30,45)}G  {random.randint(10,20)}% /\ntmpfs           100M     0M  100M   0% /tmp"
+def get_dynamic_df():
+    sizes = {"sda1": "50G", "tmpfs": "100M"}
+    used = {"sda1": f"{random.randint(5, 10)}G", "tmpfs": "0M"}
+    avail = {"sda1": f"{random.randint(30, 45)}G", "tmpfs": "100M"}
+    usep = {"sda1": f"{random.randint(10, 20)}%", "tmpfs": "0%"}
+    return f"""Filesystem      Size  Used Avail Use% Mounted on
+/dev/sda1        {sizes['sda1']}   {used['sda1']}   {avail['sda1']}  {usep['sda1']} /
+tmpfs           {sizes['tmpfs']}     {used['tmpfs']}  {avail['tmpfs']}   {usep['tmpfs']} /tmp"""
+
 @lru_cache(maxsize=10)
-def get_dynamic_uptime(): return f"03:07 AM CEST, Sat Jun 14, 2025 up {random.randint(3,10)} days, {random.randint(0,23)}:{random.randint(0,59):02d}, {random.randint(1,5)} user{'s' if random.randint(1,5)>1 else ''}, load average: {random.uniform(0.00,1.00):.2f}, {random.uniform(0.00,1.00):.2f}, {random.uniform(0.00,1.00):.2f}"
+def get_dynamic_uptime():
+    now = datetime.now().strftime("%H:%M:%S")
+    days = random.randint(3, 10)
+    hours = random.randint(0, 23)
+    minutes = random.randint(0, 59)
+    users = random.randint(1, 5)
+    la1, la2, la3 = [f"{random.uniform(0.00, 1.00):.2f}" for _ in range(3)]
+    return f"{now} up {days} days, {hours}:{minutes:02d}, {users} user{'s' if users > 1 else ''}, load average: {la1}, {la2}, {la3}"
+
 @lru_cache(maxsize=10)
-def get_dynamic_ps(): return "\r\n".join(["USER       PID %CPU %MEM    VSZ   RSS TTY   STAT START   TIME COMMAND"] + [f"{random.choice(['root','admin','devops']):<10} {random.randint(1,5000):<6} {random.uniform(0.0,5.0):<5.1f} {random.uniform(0.5,3.0):<5.1f} {random.randint(10000,50000):<7} {random.randint(1000,5000):<6} {random.choice(['pts/0','pts/1','?','tty7']):<6} {random.choice(['Ss','S+','R']):<5} {(datetime.now()-timedelta(hours=random.randint(1,24))).strftime('%H:%M'):<8} {random.randint(0,2)}:{random.randint(0,59):02d} {random.choice(['/sbin/init','/usr/sbin/sshd -D','/usr/bin/python3 app.py'])}" for _ in range(5)])
-def get_dynamic_top(): return "top - %s up %d days, %02d:%02d, %d user%s, load average: %.2f, %.2f, %.2f\nTasks: %d total, %d running, %d sleeping, %d stopped, %d zombie\n%%Cpu(s): %.1f us, %.1f sy, %.1f ni, %.1f id, %.1f wa, %.1f hi, %.1f si, %.1f st\nMiB Mem : %d total, %d free, %d used, %d buff/cache\n%s" % (datetime.now().strftime("%H:%M:%S"), random.randint(3,10), random.randint(0,23), random.randint(0,59), random.randint(1,5), "s" if random.randint(1,5)>1 else "", random.uniform(0.0,1.0), random.uniform(0.0,1.0), random.uniform(0.0,1.0), random.randint(50,100), random.randint(1,5), random.randint(40,80), 0, 0, random.uniform(0,10), random.uniform(0,5), 0, random.uniform(80,90), random.uniform(0,2), random.uniform(0,1), random.uniform(0,1), 0, random.randint(16000,32000), random.randint(1000,5000), random.randint(5000,10000), random.randint(1000,5000), get_dynamic_ps().split("\n")[1:5])
+def get_dynamic_ps():
+    processes = [
+        ("root", "1", "/sbin/init"),
+        ("root", "135", "/usr/sbin/sshd -D"),
+        ("mysql", "220", "/usr/sbin/mysqld"),
+        ("www-data", "300", "/usr/sbin/nginx -g 'daemon off;'"),
+        ("admin", str(random.randint(1000, 5000)), "/bin/bash"),
+        ("devops", str(random.randint(1000, 5000)), "/usr/bin/python3 app.py"),
+        ("dbadmin", str(random.randint(1000, 5000)), "/bin/sh scripts.sh")
+    ]
+    if random.random() < 0.3:
+        processes.append(("root", str(random.randint(6000, 7000)), "/usr/bin/find / -name '*.log'"))
+    lines = ["USER       PID %CPU %MEM    VSZ   RSS TTY   STAT START   TIME COMMAND"]
+    for user, pid, cmd in processes:
+        cpu = round(random.uniform(0.0, 5.0), 1)
+        mem = round(random.uniform(0.5, 3.0), 1)
+        vsz = random.randint(10000, 50000)
+        rss = random.randint(1000, 5000)
+        tty = random.choice(["pts/0", "pts/1", "?", "tty7"])
+        stat = random.choice(["Ss", "S+", "R"])
+        start = (datetime.now() - timedelta(hours=random.randint(1, 24))).strftime("%H:%M")
+        time_str = f"{random.randint(0, 2)}:{random.randint(0, 59):02d}"
+        lines.append(f"{user:<10} {pid:<6} {cpu:<5} {mem:<5} {vsz:<7} {rss:<6} {tty:<6} {stat:<5} {start:<8} {time_str:<6} {cmd}")
+    return "\r\n".join(lines)
+
+def get_dynamic_top():
+    header = "top - %s up %d days, %02d:%02d, %d user%s, load average: %.2f, %.2f, %.2f\n" % (
+        datetime.now().strftime("%H:%M:%S"), random.randint(3, 10), random.randint(0, 23),
+        random.randint(0, 59), random.randint(1, 5), "s" if random.randint(1, 5) > 1 else "",
+        random.uniform(0.0, 1.0), random.uniform(0.0, 1.0), random.uniform(0.0, 1.0)
+    )
+    tasks = "Tasks: %d total, %d running, %d sleeping, %d stopped, %d zombie\n" % (
+        random.randint(50, 100), random.randint(1, 5), random.randint(40, 80), 0, 0
+    )
+    cpu = "%%Cpu(s): %.1f us, %.1f sy, %.1f ni, %.1f id, %.1f wa, %.1f hi, %.1f si, %.1f st\n" % (
+        random.uniform(0, 10), random.uniform(0, 5), 0, random.uniform(80, 90),
+        random.uniform(0, 2), random.uniform(0, 1), random.uniform(0, 1), 0
+    )
+    mem = "MiB Mem : %d total, %d free, %d used, %d buff/cache\n" % (
+        random.randint(16000, 32000), random.randint(1000, 5000), random.randint(5000, 10000),
+        random.randint(1000, 5000)
+    )
+    processes = get_dynamic_ps().split("\n")[1:]
+    return header + tasks + cpu + mem + "\n" + "\n".join(processes[:5])
+
 @lru_cache(maxsize=10)
-def get_dynamic_netstat(): return "\r\n".join(["Proto Recv-Q Send-Q Local Address           Foreign Address         State       PID/Program name"] + [f"tcp        {random.randint(0,10)}      {random.randint(0,10)} 192.168.1.{random.randint(2,254)}:{random.choice([22,80,443,3306,8080])} 10.0.0.{random.randint(2,254)}:{random.randint(1024,65535)} {random.choice(['ESTABLISHED','TIME_WAIT','CLOSE_WAIT','LISTEN']):<10} {random.randint(100,999)}/app{random.randint(1,5)}" for _ in range(random.randint(2,6))])
+def get_dynamic_netstat():
+    lines = ["Proto Recv-Q Send-Q Local Address           Foreign Address         State       PID/Program name"]
+    for _ in range(random.randint(2, 6)):
+        local_ip = f"192.168.1.{random.randint(2, 254)}"
+        local_port = random.choice([22, 80, 443, 3306, 8080])
+        foreign_ip = f"10.0.0.{random.randint(2, 254)}"
+        foreign_port = random.randint(1024, 65535)
+        state = random.choice(["ESTABLISHED", "TIME_WAIT", "CLOSE_WAIT", "LISTEN"])
+        pid_prog = f"{random.randint(100, 999)}/app{random.randint(1, 5)}"
+        lines.append(f"tcp        {random.randint(0, 10)}      {random.randint(0, 10)} {local_ip}:{local_port}  {foreign_ip}:{foreign_port}  {state:<10} {pid_prog}")
+    return "\r\n".join(lines)
+
 @lru_cache(maxsize=10)
-def get_dynamic_messages(): return "\n".join([f"{(datetime.now()-timedelta(minutes=random.randint(0,1440))).strftime('%b %d %H:%M:%S')} debian {random.choice(['sshd','systemd','cron','nginx','apache2','mysqld'])[random.randint(1000,9999)]}: {random.choice(['Started service.','Connection from 192.168.1.{random.randint(2,254)}','Configuration loaded','Warning: High CPU usage','Failed login from 192.168.1.{random.randint(2,254)}','Suspicious activity on port {random.randint(1024,65535)}'])}" for _ in range(10)])
+def get_dynamic_messages():
+    lines = []
+    for _ in range(10):
+        timestamp = (datetime.now() - timedelta(minutes=random.randint(0, 1440))).strftime("%b %d %H:%M:%S")
+        src_ip = f"192.168.1.{random.randint(2, 254)}"
+        service = random.choice(["sshd", "systemd", "cron", "nginx", "apache2", "mysqld"])
+        message = random.choice([
+            f"{service}[{random.randint(1000, 9999)}]: Started {service} service.",
+            f"{service}: Connection from {src_ip}",
+            f"{service}: Configuration loaded successfully.",
+            f"{service}: Warning: High CPU usage detected.",
+            f"{service}: Failed login attempt from {src_ip}",
+            f"{service}: Suspicious activity on port {random.randint(1024, 65535)}"
+        ])
+        lines.append(f"{timestamp} debian {message}")
+    return "\n".join(lines)
+
 @lru_cache(maxsize=10)
-def get_dynamic_dmesg(): return "\n".join([f"[{random.uniform(0,1000):.6f}] {random.choice(['kernel: [CPU0] microcode updated early to revision 0xca','kernel: random: crng init done','kernel: EXT4-fs (sda1): mounted filesystem with ordered data mode','kernel: ACPI: Power Button [PWRB]'])}" for _ in range(10)])
+def get_dynamic_dmesg():
+    lines = []
+    for _ in range(10):
+        timestamp = f"[{random.uniform(0, 1000):.6f}]"
+        message = random.choice([
+            "kernel: [CPU0] microcode updated early to revision 0xca",
+            "kernel: random: crng init done",
+            "kernel: EXT4-fs (sda1): mounted filesystem with ordered data mode",
+            "kernel: ACPI: Power Button [PWRB]"
+        ])
+        lines.append(f"{timestamp} {message}")
+    return "\n".join(lines)
+
 @lru_cache(maxsize=10)
-def get_dynamic_network_scan(): return "\n".join([f"{ip}:{FAKE_SERVICES[service]} open {service}" for ip, info in FAKE_NETWORK_HOSTS.items() for service in info["services"] if FAKE_SERVICES.get(service)])
+def get_dynamic_network_scan():
+    lines = []
+    for ip, info in FAKE_NETWORK_HOSTS.items():
+        for service in info["services"]:
+            port = FAKE_SERVICES.get(service, 0)
+            if port:
+                lines.append(f"{ip}:{port} open {service}")
+    return "\n".join(lines)
+
 @lru_cache(maxsize=10)
-def get_dynamic_arp(): return "\n".join(["Address                  HWtype  HWaddress           Flags Mask            Iface"] + [f"{ip:<24} ether   {':'.join(f'{random.randint(0,255):02x}' for _ in range(6))}   C                     eth0" for ip in FAKE_NETWORK_HOSTS])
+def get_dynamic_arp():
+    lines = ["Address                  HWtype  HWaddress           Flags Mask            Iface"]
+    for ip in FAKE_NETWORK_HOSTS:
+        mac = ":".join([f"{random.randint(0, 255):02x}" for _ in range(6)])
+        lines.append(f"{ip:<24} ether   {mac}   C                     eth0")
+    return "\n".join(lines)
+
 @lru_cache(maxsize=10)
-def get_dynamic_who(): return "\n".join([f"{user:<10} {random.choice(['pts/0','pts/1','tty7']):<8} {(datetime.now()-timedelta(minutes=random.randint(0,1440))).strftime('%Y-%m-%d %H:%M')} 192.168.1.{random.randint(10,50)}" for user in ["admin", "devops", "dbadmin"] + [f"temp_{''.join(random.choices(string.ascii_lowercase, k=6))}" for _ in range(random.randint(0,3))]])
-def get_dynamic_w(): return " 03:07 AM CEST, Sat Jun 14, 2025 up 7 days,  3:45,  2 users,  load average: 0.10, 0.20, 0.30\nUSER     TTY      FROM             LOGIN@   IDLE   JCPU   PCPU WHAT\n" + "\n".join(get_dynamic_who().split("\n")[1:3])
+def get_dynamic_who():
+    lines = []
+    users = ["admin", "devops", "dbadmin"] + [f"temp_{''.join(random.choices(string.ascii_lowercase, k=6))}" for _ in range(random.randint(0, 3))]
+    for user in users:
+        timestamp = (datetime.now() - timedelta(minutes=random.randint(0, 1440))).strftime("%Y-%m-%d %H:%M")
+        tty = random.choice(["pts/0", "pts/1", "tty7"])
+        host = f"192.168.1.{random.randint(10, 50)}"
+        lines.append(f"{user:<10} {tty:<8} {timestamp} {host}")
+    return "\n".join(lines)
+
 def get_dev_null(): return ""
 def get_dev_zero(): return "\0" * 1024
 
-def generate_tree_output(start_path, fs, prefix=""):
-    output = ""
-    if start_path not in fs or fs[start_path]["type"] != "dir":
-        return f"tree: {start_path}: Not a directory"
-    contents = fs[start_path]["contents"]
-    for index, item in enumerate(contents):
-        connector = "├── " if index < len(contents) - 1 else "└── "
-        child_path = os.path.join(start_path, item)
-        output += f"{prefix}{connector}{item}\n"
-        if child_path in fs and fs[child_path]["type"] == "dir":
-            extension = "│   " if index < len(contents) - 1 else "    "
-            output += generate_tree_output(child_path, fs, prefix + extension)
-    return output
-
-def generate_prompt(username, current_dir):
-    host = socket.gethostname().split('.')[0]
-    now = datetime.now().strftime("%H:%M:%S")
-    user_col = "\033[1;32m" if username == "root" else "\033[1;34m"
-    path_col = "\033[1;36m"
-    reset = "\033[0m"
-    return f"{user_col}{username}@{host}{reset}:{path_col}{current_dir}{reset} {now}$ "
-
+# Gestion du système de fichiers
 def init_filesystem_db():
     try:
         with sqlite3.connect(FS_DB) as conn:
@@ -208,11 +309,248 @@ def init_filesystem_db():
                     mtime TEXT
                 )
             """)
-        logger.info("Filesystem database initialized", extra={'client_ip': 'N/A', 'session_id': 'N/A'})
+            print("[*] Filesystem database initialized successfully")
     except sqlite3.Error as e:
-        logger.error(f"Filesystem DB init error: {e}", extra={'client_ip': 'N/A', 'session_id': 'N/A'})
+        print(f"[!] Filesystem DB init error: {e}")
         raise
 
+def load_filesystem():
+    fs = {}
+    try:
+        with sqlite3.connect(FS_DB) as conn:
+            conn.row_factory = sqlite3.Row
+            cur = conn.cursor()
+            cur.execute("SELECT path, type, content, owner, permissions, mtime FROM filesystem")
+            for row in cur.fetchall():
+                path = row["path"]
+                fs[path] = {
+                    "type": row["type"],
+                    "content": row["content"] if row["content"] is not None else "",
+                    "owner": row["owner"] or "root",
+                    "permissions": row["permissions"] or "rw-r--r--",
+                    "mtime": row["mtime"] or datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                    "contents": [] if row["type"] == "dir" else None
+                }
+                parent_dir = "/".join(path.split("/")[:-1]) or "/"
+                if parent_dir not in fs:
+                    fs[parent_dir] = {"type": "dir", "contents": [], "owner": "root", "permissions": "rwxr-xr-x", "mtime": datetime.now().strftime("%Y-%m-%d %H:%M:%S")}
+                if path != "/" and row["type"] == "dir" and path not in fs[parent_dir]["contents"]:
+                    fs[parent_dir]["contents"].append(path.split("/")[-1])
+    except sqlite3.Error as e:
+        print(f"[!] Filesystem load error: {e}")
+    return fs
+
+def save_filesystem(fs):
+    try:
+        with sqlite3.connect(FS_DB) as conn:
+            conn.execute("DELETE FROM filesystem")  # Efface et réinsère pour simplicité
+            for path, data in fs.items():
+                conn.execute(
+                    "INSERT INTO filesystem (path, type, content, owner, permissions, mtime) VALUES (?, ?, ?, ?, ?, ?)",
+                    (path, data["type"], data.get("content", "") if not callable(data.get("content")) else "", data.get("owner", "root"), data.get("permissions", "rw-r--r--"), data.get("mtime", datetime.now().strftime("%Y-%m-%d %H:%M:%S")))
+                )
+    except sqlite3.Error as e:
+        print(f"[!] Filesystem save error: {e}")
+
+BASE_FILE_SYSTEM = {
+    "/": {"type": "dir", "contents": ["bin", "sbin", "usr", "var", "opt", "root", "home", "etc", "tmp", "proc", "dev", "sys", "lib"], "owner": "root", "permissions": "rwxr-xr-x", "mtime": datetime.now().strftime("%Y-%m-%d %H:%M:%S")},
+    "/bin": {"type": "dir", "contents": ["bash", "ls", "cat", "grep", "chmod", "chown", "mv", "cp", "top", "ifconfig", "ip", "find", "scp", "apt-get", "curl", "wget", "telnet", "ping", "nmap", "who", "w"], "owner": "root", "permissions": "rwxr-xr-x", "mtime": datetime.now().strftime("%Y-%m-%d %H:%M:%S")},
+    "/sbin": {"type": "dir", "contents": ["init", "sshd", "iptables", "reboot"], "owner": "root", "permissions": "rwxr-xr-x", "mtime": datetime.now().strftime("%Y-%m-%d %H:%M:%S")},
+    "/var": {"type": "dir", "contents": ["log", "www"], "owner": "root", "permissions": "rwxr-xr-x", "mtime": datetime.now().strftime("%Y-%m-%d %H:%M:%S")},
+    "/var/log": {"type": "dir", "contents": ["syslog", "messages", "auth.log"], "owner": "root", "permissions": "rwxr-xr-x", "mtime": datetime.now().strftime("%Y-%m-%d %H:%M:%S")},
+    "/var/log/syslog": {"type": "file", "content": get_dynamic_messages, "owner": "root", "permissions": "rw-r--r--", "mtime": datetime.now().strftime("%Y-%m-%d %H:%M:%S")},
+    "/var/log/messages": {"type": "file", "content": get_dynamic_messages, "owner": "root", "permissions": "rw-r--r--", "mtime": datetime.now().strftime("%Y-%m-%d %H:%M:%S")},
+    "/var/log/auth.log": {"type": "file", "content": get_dynamic_messages, "owner": "root", "permissions": "rw-r-----", "mtime": datetime.now().strftime("%Y-%m-%d %H:%M:%S")},
+    "/var/www": {"type": "dir", "contents": ["html"], "owner": "www-data", "permissions": "rwxr-xr-x", "mtime": datetime.now().strftime("%Y-%m-%d %H:%M:%S")},
+    "/var/www/html": {"type": "dir", "contents": ["index.html", "config.php"], "owner": "www-data", "permissions": "rwxr-xr-x", "mtime": datetime.now().strftime("%Y-%m-%d %H:%M:%S")},
+    "/var/www/html/index.html": {"type": "file", "content": "<html><body><h1>Welcome to Server</h1></body></html>", "owner": "www-data", "permissions": "rw-r--r--", "mtime": datetime.now().strftime("%Y-%m-%d %H:%M:%S")},
+    "/tmp": {"type": "dir", "contents": [], "owner": "root", "permissions": "rwxrwxrwt", "mtime": datetime.now().strftime("%Y-%m-%d %H:%M:%S")},
+    "/etc": {"type": "dir", "contents": ["passwd", "shadow", "group"], "owner": "root", "permissions": "rwxr-xr-x", "mtime": datetime.now().strftime("%Y-%m-%d %H:%M:%S")},
+    "/etc/passwd": {"type": "file", "content": "\n".join(f"{user}:x:{info['uid']}:1000::{info['home']}:/bin/bash" for user, info in PREDEFINED_USERS.items() if info.get("home", "").startswith("/home")), "owner": "root", "permissions": "rw-r--r--", "mtime": datetime.now().strftime("%Y-%m-%d %H:%M:%S")},
+    "/etc/shadow": {"type": "file", "content": "\n".join(f"{user}:$6$...:18264:0:99999:7:::" for user in PREDEFINED_USERS if user not in ["mysql", "www-data"]), "owner": "root", "permissions": "rw-r-----", "mtime": datetime.now().strftime("%Y-%m-%d %H:%M:%S")},
+    "/etc/group": {"type": "file", "content": "\n".join(f"{group}:x:{1000+i}:" for i, group in enumerate(set(group for user in PREDEFINED_USERS.values() for group in user.get("groups", [])))), "owner": "root", "permissions": "rw-r--r--", "mtime": datetime.now().strftime("%Y-%m-%d %H:%M:%S")},
+    "/proc": {"type": "dir", "contents": ["cpuinfo", "meminfo"], "owner": "root", "permissions": "rwxr-xr-x", "mtime": datetime.now().strftime("%Y-%m-%d %H:%M:%S")},
+    "/proc/cpuinfo": {"type": "file", "content": "processor\t: 0\nvendor_id\t: GenuineIntel\ncpu family\t: 6\nmodel\t\t: 142\nmodel name\t: Intel(R) Core(TM) i5-8250U CPU @ 1.60GHz", "owner": "root", "permissions": "rw-r--r--", "mtime": datetime.now().strftime("%Y-%m-%d %H:%M:%S")},
+    "/proc/meminfo": {"type": "file", "content": f"MemTotal:       {random.randint(16000, 32000)} kB\nMemFree:        {random.randint(1000, 5000)} kB", "owner": "root", "permissions": "rw-r--r--", "mtime": datetime.now().strftime("%Y-%m-%d %H:%M:%S")},
+    "/dev": {"type": "dir", "contents": ["null", "zero"], "owner": "root", "permissions": "rwxr-xr-x", "mtime": datetime.now().strftime("%Y-%m-%d %H:%M:%S")},
+    "/dev/null": {"type": "file", "content": get_dev_null, "owner": "root", "permissions": "rw-rw-rw-", "mtime": datetime.now().strftime("%Y-%m-%d %H:%M:%S")},
+    "/dev/zero": {"type": "file", "content": get_dev_zero, "owner": "root", "permissions": "rw-rw-rw-", "mtime": datetime.now().strftime("%Y-%m-%d %H:%M:%S")},
+}
+
+def populate_predefined_users(fs):
+    if "/home" not in fs:
+        fs["/home"] = {"type": "dir", "contents": [], "owner": "root", "permissions": "rwxr-xr-x", "mtime": datetime.now().strftime("%Y-%m-%d %H:%M:%S")}
+    for user, info in PREDEFINED_USERS.items():
+        home_dir = info["home"]
+        fs[home_dir] = {"type": "dir", "contents": list(info["files"].keys()), "owner": user, "permissions": "rwxr-xr-x", "mtime": datetime.now().strftime("%Y-%m-%d %H:%M:%S")}
+        if user not in fs["/home"]["contents"] and home_dir.startswith("/home/"):
+            fs["/home"]["contents"].append(user)
+        for filename, content in info["files"].items():
+            fs[f"{home_dir}/{filename}"] = {"type": "file", "content": content, "owner": user, "permissions": "rw-r--r--", "mtime": datetime.now().strftime("%Y-%m-%d %H:%M:%S")}
+    return fs
+
+def add_vulnerabilities(fs):
+    fs["/tmp/suspicious.sh"] = {"type": "file", "content": "#!/bin/bash\necho 'Running script...'\ncurl http://example.com", "owner": "root", "permissions": "rwxr-xr-x", "mtime": datetime.now().strftime("%Y-%m-%d %H:%M:%S")}
+    fs["/tmp"]["contents"].append("suspicious.sh")
+    fs["/home/admin/backup_pass.txt"] = {"type": "file", "content": "root:admin123\nbackup_user:backup456", "owner": "admin", "permissions": "rw-rw-r--", "mtime": datetime.now().strftime("%Y-%m-%d %H:%M:%S")}
+    fs["/home/admin"]["contents"].append("backup_pass.txt")
+
+init_filesystem_db()
+FS = load_filesystem()
+if not FS:
+    FS = populate_predefined_users(BASE_FILE_SYSTEM.copy())
+    add_vulnerabilities(FS)
+    save_filesystem(FS)
+
+# Autocomplétion
+def get_completions(current_input, current_dir, username, fs, history):
+    base_cmds = list(COMMAND_OPTIONS.keys()) + ["whoami", "id", "uname", "pwd", "exit", "history", "sudo", "su", "curl", "wget", "telnet", "ping", "nmap", "arp", "scp", "sftp", "who", "w", "touch", "rm", "mkdir", "rmdir", "cp", "mv", "vim", "nano", "backup_data", "systemctl", "fg", "app_status", "status_report", "jobs"]
+    if not current_input.strip():
+        return sorted(base_cmds)
+    parts = current_input.strip().split()
+    cmd = parts[0] if parts else ""
+    partial = parts[-1] if parts else ""
+    prev_parts = parts[:-1] if len(parts) > 1 else []
+    completions = []
+    if len(parts) == 1 and not current_input.endswith(" "):
+        completions = [c for c in base_cmds if c.startswith(partial)]
+        return sorted(completions)
+    if cmd in COMMAND_OPTIONS and (partial.startswith("-") or prev_parts and prev_parts[-1].startswith("-")):
+        completions = [opt for opt in COMMAND_OPTIONS[cmd] if opt.startswith(partial)]
+        return sorted(completions)
+    if cmd in ["cd", "ls", "cat", "rm", "scp", "find", "grep", "touch", "mkdir", "rmdir", "cp", "mv"]:
+        path = partial if partial.startswith("/") else f"{current_dir}/{partial}" if current_dir != "/" else f"/{partial}"
+        path = os.path.normpath(path)
+        parent_dir = os.path.dirname(path) or "/"
+        base_name = os.path.basename(path) or ""
+        if parent_dir in fs and fs[parent_dir]["type"] == "dir" and "contents" in fs[parent_dir]:
+            for item in fs[parent_dir]["contents"]:
+                full_path = f"{parent_dir}/{item}" if parent_dir != "/" else f"/{item}"
+                if full_path in fs and item.startswith(base_name):
+                    if cmd == "cd" and fs[full_path]["type"] == "dir":
+                        completions.append(item)
+                    elif cmd in ["ls", "cat", "rm", "scp", "find", "grep", "touch", "mkdir", "rmdir", "cp", "mv"]:
+                        completions.append(item)
+        return sorted([f"{partial.rsplit('/', 1)[0]}/{c}" if partial.rsplit('/', 1)[0] else c for c in completions])
+    if cmd in ["ping", "telnet", "nmap", "scp", "curl", "wget"]:
+        for ip, info in FAKE_NETWORK_HOSTS.items():
+            if info["name"].startswith(partial) or ip.startswith(partial):
+                completions.append(info["name"])
+                completions.append(ip)
+    completions.extend([h for h in history[-10:] if h.startswith(partial)])
+    return sorted(completions)
+
+def autocomplete(current_input, current_dir, username, fs, chan, history):
+    completions = get_completions(current_input, current_dir, username, fs, history)
+    if len(completions) == 1:
+        parts = current_input.split()
+        if len(parts) <= 1:
+            return completions[0]
+        parts[-1] = completions[0]
+        return " ".join(parts)
+    elif completions:
+        chan.send(b"\r\n" + "\r\n".join(c.encode() for c in completions[:10]) + b"\r\n")
+        return current_input
+    return current_input
+
+# Gestion des fichiers
+def modify_file(fs, path, content, username, session_id, client_ip):
+    allowed_paths = [f"{PREDEFINED_USERS[username]['home']}/{f}" for f in PREDEFINED_USERS.get(username, {}).get("files", {}).keys()]
+    if path.startswith("/tmp/") or path in allowed_paths:
+        fs[path] = {"type": "file", "content": content, "owner": username, "permissions": "rw-r--r--", "mtime": datetime.now().strftime("%Y-%m-%d %H:%M:%S")}
+        trigger_alert(session_id, "File Modified", f"Modified file: {path}", client_ip, username)
+        save_filesystem(fs)
+        return True
+    return False
+
+# Alertes (remplace les logs)
+def trigger_alert(session_id, event_type, details, client_ip, username):
+    timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S.%f")
+    geo_info = "Unknown"
+    try:
+        geo_data = ipapi.location(client_ip)
+        geo_info = f"{geo_data.get('city', 'Unknown')}, {geo_data.get('country', 'Unknown')}"
+    except Exception:
+        pass
+    details = f"{details} (Geo: {geo_info})"
+    print(f"[ALERT] {timestamp} - {client_ip} ({username}) : {event_type} - {details}")
+    try:
+        with smtplib.SMTP(SMTP_HOST, SMTP_PORT) as smtp:
+            smtp.starttls()
+            smtp.login(SMTP_USER, SMTP_PASS)
+            msg = MIMEText(f"Time: {timestamp}\nIP: {client_ip}\nUser: {username}\nEvent: {event_type}\nDetails: {details}")
+            msg["From"] = ALERT_FROM
+            msg["To"] = ALERT_TO
+            msg["Subject"] = f"Security Alert - {event_type}"
+            smtp.send_message(msg)
+    except smtplib.SMTPException as e:
+        print(f"[!] SMTP error: {str(e)}")
+    try:
+        with sqlite3.connect(DB_NAME) as conn:
+            conn.execute(
+                "INSERT INTO events (timestamp, ip, username, event_type, details) VALUES (?, ?, ?, ?, ?)",
+                (timestamp, client_ip, username, event_type, details)
+            )
+    except sqlite3.Error as e:
+        print(f"[!] DB error: {e}")
+
+def log_activity(session_id, client_ip, username, key):
+    timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S.%f")
+    print(f"[ACTIVITY] {timestamp},{session_id},{client_ip},{username},{key}")
+
+def log_session_activity(session_id, client_ip, username, command_line, output):
+    timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    print(f"[SESSION] {timestamp}|{client_ip}|{username}|{command_line}|{output}")
+
+# Détection de bruteforce
+def check_bruteforce(client_ip, username, password):
+    timestamp = time.time()
+    with _brute_force_lock:
+        if client_ip not in _brute_force_attempts:
+            _brute_force_attempts[client_ip] = []
+        _brute_force_attempts[client_ip].append((timestamp, username, password))
+        _brute_force_attempts[client_ip] = [attempt for attempt in _brute_force_attempts[client_ip] if timestamp - attempt[0] < BRUTE_FORCE_WINDOW]
+        if len(_brute_force_attempts[client_ip]) > BRUTE_FORCE_THRESHOLD:
+            if client_ip not in _brute_force_alerted:
+                trigger_alert(-1, "Bruteforce Detected", f"Multiple login attempts from {client_ip}", client_ip, "unknown")
+                _brute_force_alerted.add(client_ip)
+            return False
+    return True
+
+def cleanup_bruteforce_attempts():
+    while True:
+        with _brute_force_lock:
+            current_time = time.time()
+            for ip in list(_brute_force_attempts.keys()):
+                _brute_force_attempts[ip] = [attempt for attempt in _brute_force_attempts[ip] if current_time - attempt[0] < BRUTE_FORCE_WINDOW]
+                if not _brute_force_attempts[ip]:
+                    del _brute_force_attempts[ip]
+                    _brute_force_alerted.discard(ip)
+        time.sleep(3600)
+
+# Détection des scans de ports
+def detect_port_scan(ip, port):
+    try:
+        with sqlite3.connect(DB_NAME) as conn:
+            cur = conn.cursor()
+            cur.execute(
+                "SELECT COUNT(*) FROM events WHERE ip = ? AND event_type LIKE '%Connection' AND timestamp > ?",
+                (ip, (datetime.now() - timedelta(minutes=5)).strftime("%Y-%m-%d %H:%M:%S"))
+            )
+            count = cur.fetchone()[0]
+            if count >= 3:
+                trigger_alert(-1, "Port Scan Detected", f"Potential scan from {ip} on port {port}", ip, "unknown")
+    except sqlite3.Error as e:
+        print(f"[!] Port scan detection error: {e}")
+
+# Gestion de l'historique
+def load_history(username):
+    return []  # Pas de fichier, donc vide par défaut
+
+def save_history(username, history):
+    pass  # Pas de sauvegarde dans un fichier
+
+# Initialisation de la base de données
 def init_database():
     try:
         with sqlite3.connect(DB_NAME) as conn:
@@ -241,818 +579,641 @@ def init_database():
                     username TEXT NOT NULL,
                     event_type TEXT NOT NULL,
                     details TEXT NOT NULL
-                );
-                CREATE TABLE IF NOT EXISTS sftp_operations (
-                    id INTEGER PRIMARY KEY AUTOINCREMENT,
-                    timestamp TEXT NOT NULL,
-                    ip TEXT NOT NULL,
-                    username TEXT NOT NULL,
-                    operation TEXT NOT NULL,
-                    path TEXT NOT NULL,
-                    details TEXT
                 )
             """)
-        logger.info("Database initialized", extra={'client_ip': 'N/A', 'session_id': 'N/A'})
+            print("[*] Database initialized successfully")
     except sqlite3.Error as e:
-        logger.error(f"DB init error: {e}", extra={'client_ip': 'N/A', 'session_id': 'N/A'})
+        print(f"[!] DB init error: {e}")
         raise
 
-def load_filesystem():
-    fs = {}
-    try:
-        with sqlite3.connect(FS_DB) as conn:
-            conn.row_factory = sqlite3.Row
-            cur = conn.cursor()
-            cur.execute("SELECT path, type, content, owner, permissions, mtime FROM filesystem")
-            for row in cur.fetchall():
-                path = row["path"]
-                fs[path] = {
-                    "type": row["type"],
-                    "content": row["content"] if row["content"] is not None else "",
-                    "owner": row["owner"] or "root",
-                    "permissions": row["permissions"] or "rw-r--r--",
-                    "mtime": row["mtime"] or datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-                    "contents": [] if row["type"] == "dir" else None
-                }
-                parent_dir = "/".join(path.split("/")[:-1]) or "/"
-                if parent_dir not in fs:
-                    fs[parent_dir] = {"type": "dir", "contents": [], "owner": "root", "permissions": "rwxr-xr-x", "mtime": datetime.now().strftime("%Y-%m-%d %H:%M:%S")}
-                if path != "/" and row["type"] == "dir" and path not in fs[parent_dir]["contents"]:
-                    fs[parent_dir]["contents"].append(path.split("/")[-1])
-    except sqlite3.Error as e:
-        logger.error(f"Filesystem load error: {e}", extra={'client_ip': 'N/A', 'session_id': 'N/A'})
-        return None
-    return fs if fs else None
-
-def save_filesystem(fs):
-    try:
-        with sqlite3.connect(FS_DB) as conn:
-            conn.execute("DELETE FROM filesystem")
-            for path, data in fs.items():
-                conn.execute(
-                    "INSERT INTO filesystem (path, type, content, owner, permissions, mtime) VALUES (?, ?, ?, ?, ?, ?)",
-                    (path, data["type"], data.get("content", "") if not callable(data.get("content")) else "", data.get("owner", "root"), data.get("permissions", "rw-r--r--"), data.get("mtime", datetime.now().strftime("%Y-%m-%d %H:%M:%S")))
-                )
-        logger.info("Filesystem saved", extra={'client_ip': 'N/A', 'session_id': 'N/A'})
-    except sqlite3.Error as e:
-        logger.error(f"Filesystem save error: {e}", extra={'client_ip': 'N/A', 'session_id': 'N/A'})
-
-BASE_FILE_SYSTEM = {
-    "/": {"type": "dir", "contents": ["bin", "sbin", "usr", "var", "opt", "root", "home", "etc", "tmp", "proc", "dev", "sys", "lib"], "owner": "root", "permissions": "rwxr-xr-x", "mtime": datetime.now().strftime("%Y-%m-%d %H:%M:%S")},
-    "/bin": {"type": "dir", "contents": ["bash", "ls", "cat", "grep", "chmod", "chown", "mv", "cp", "top", "ifconfig", "ip", "find", "scp", "apt-get", "curl", "wget", "telnet", "ping", "nmap", "who", "w", "app_status", "status_report", "backup_data"], "owner": "root", "permissions": "rwxr-xr-x", "mtime": datetime.now().strftime("%Y-%m-%d %H:%M:%S")},
-    "/sbin": {"type": "dir", "contents": ["init", "sshd", "iptables", "reboot"], "owner": "root", "permissions": "rwxr-xr-x", "mtime": datetime.now().strftime("%Y-%m-%d %H:%M:%S")},
-    "/var": {"type": "dir", "contents": ["log", "www", "lib"], "owner": "root", "permissions": "rwxr-xr-x", "mtime": datetime.now().strftime("%Y-%m-%d %H:%M:%S")},
-    "/var/log": {"type": "dir", "contents": ["syslog", "messages", "auth.log", ".hidden_log"], "owner": "root", "permissions": "rwxr-xr-x", "mtime": datetime.now().strftime("%Y-%m-%d %H:%M:%S")},
-    "/var/log/syslog": {"type": "file", "content": get_dynamic_messages, "owner": "root", "permissions": "rw-r--r--", "mtime": datetime.now().strftime("%Y-%m-%d %H:%M:%S")},
-    "/var/log/messages": {"type": "file", "content": get_dynamic_messages, "owner": "root", "permissions": "rw-r--r--", "mtime": datetime.now().strftime("%Y-%m-%d %H:%M:%S")},
-    "/var/log/auth.log": {"type": "file", "content": get_dynamic_messages, "owner": "root", "permissions": "rw-r--r--", "mtime": datetime.now().strftime("%Y-%m-%d %H:%M:%S")},
-    "/var/log/.hidden_log": {"type": "file", "content": "Hidden log data: access denied", "owner": "root", "permissions": "r--r--r--", "mtime": datetime.now().strftime("%Y-%m-%d %H:%M:%S")},
-    "/var/www": {"type": "dir", "contents": ["html"], "owner": "www-data", "permissions": "rwxr-xr-x", "mtime": datetime.now().strftime("%Y-%m-%d %H:%M:%S")},
-    "/var/www/html": {"type": "dir", "contents": ["index.html", "config.php", ".htaccess", "error.log"], "owner": "www-data", "permissions": "rwxr-xr-x", "mtime": datetime.now().strftime("%Y-%m-%d %H:%M:%S")},
-    "/var/www/html/index.html": {"type": "file", "content": "<html><body><h1>Welcome to Server</h1></body></html>", "owner": "www-data", "permissions": "rw-r--r--", "mtime": datetime.now().strftime("%Y-%m-%d %H:%M:%S")},
-    "/var/www/html/config.php": {"type": "file", "content": "<?php define('DB_PASS', 'weakpass123'); ?>", "owner": "www-data", "permissions": "rw-r--r--", "mtime": datetime.now().strftime("%Y-%m-%d %H:%M:%S")},
-    "/var/www/html/.htaccess": {"type": "file", "content": "Deny from all", "owner": "www-data", "permissions": "r--r--r--", "mtime": datetime.now().strftime("%Y-%m-%d %H:%M:%S")},
-    "/var/www/html/error.log": {"type": "file", "content": "Error: 404 at 2025-06-11 14:00", "owner": "www-data", "permissions": "rw-r--r--", "mtime": datetime.now().strftime("%Y-%m-%d %H:%M:%S")},
-    "/tmp": {"type": "dir", "contents": ["suspicious.sh", ".trap_temp", "backup.tar.gz"], "owner": "root", "permissions": "rwxrwxrwx", "mtime": datetime.now().strftime("%Y-%m-%d %H:%M:%S")},
-    "/tmp/suspicious.sh": {"type": "file", "content": "#!/bin/bash\nrm -rf /\n# Malicious script", "owner": "root", "permissions": "rwxr-xr-x", "mtime": datetime.now().strftime("%Y-%m-%d %H:%M:%S")},
-    "/tmp/.trap_temp": {"type": "file", "content": "Trap file: access logged", "owner": "root", "permissions": "rwxr-xr-x", "mtime": datetime.now().strftime("%Y-%m-%d %H:%M:%S")},
-    "/tmp/backup.tar.gz": {"type": "file", "content": "Backup data placeholder", "owner": "root", "permissions": "rw-r--r--", "mtime": datetime.now().strftime("%Y-%m-%d %H:%M:%S")},
-    "/dev": {"type": "dir", "contents": ["null", "zero"], "owner": "root", "permissions": "rwxr-xr-x", "mtime": datetime.now().strftime("%Y-%m-%d %H:%M:%S")},
-    "/dev/null": {"type": "file", "content": get_dev_null, "owner": "root", "permissions": "rwxrwxrwx", "mtime": datetime.now().strftime("%Y-%m-%d %H:%M:%S")},
-    "/dev/zero": {"type": "file", "content": get_dev_zero, "owner": "root", "permissions": "rwxrwxrwx", "mtime": datetime.now().strftime("%Y-%m-%d %H:%M:%S")},
-    "/usr": {"type": "dir", "contents": ["bin", "lib", "share"], "owner": "root", "permissions": "rwxr-xr-x", "mtime": datetime.now().strftime("%Y-%m-%d %H:%M:%S")},
-    "/usr/bin": {"type": "dir", "contents": ["python3", "vim", "nano"], "owner": "root", "permissions": "rwxr-xr-x", "mtime": datetime.now().strftime("%Y-%m-%d %H:%M:%S")},
-    "/usr/bin/python3": {"type": "file", "content": "ELF binary", "owner": "root", "permissions": "rwxr-xr-x", "mtime": datetime.now().strftime("%Y-%m-%d %H:%M:%S")},
-    "/usr/bin/vim": {"type": "file", "content": "ELF binary", "owner": "root", "permissions": "rwxr-xr-x", "mtime": datetime.now().strftime("%Y-%m-%d %H:%M:%S")},
-    "/usr/bin/nano": {"type": "file", "content": "ELF binary", "owner": "root", "permissions": "rwxr-xr-x", "mtime": datetime.now().strftime("%Y-%m-%d %H:%M:%S")},
-    "/etc": {"type": "dir", "contents": ["passwd", "ssh"], "owner": "root", "permissions": "rwxr-xr-x", "mtime": datetime.now().strftime("%Y-%m-%d %H:%M:%S")},
-    "/etc/passwd": {"type": "file", "content": "root:x:0:0:root:/root:/bin/bash", "owner": "root", "permissions": "rw-r--r--", "mtime": datetime.now().strftime("%Y-%m-%d %H:%M:%S")},
-    "/etc/ssh": {"type": "dir", "contents": ["sshd_config"], "owner": "root", "permissions": "rwxr-xr-x", "mtime": datetime.now().strftime("%Y-%m-%d %H:%M:%S")},
-    "/etc/ssh/sshd_config": {"type": "file", "content": "# SSH daemon configuration", "owner": "root", "permissions": "rw-r--r--", "mtime": datetime.now().strftime("%Y-%m-%d %H:%M:%S")},
-    "/root": {"type": "dir", "contents": [".bashrc"], "owner": "root", "permissions": "rwx------", "mtime": datetime.now().strftime("%Y-%m-%d %H:%M:%S")},
-    "/root/.bashrc": {"type": "file", "content": "alias ll='ls -la'", "owner": "root", "permissions": "rw-r--r--", "mtime": datetime.now().strftime("%Y-%m-%d %H:%M:%S")},
-    "/home": {"type": "dir", "contents": ["admin", "devops", "dbadmin"], "owner": "root", "permissions": "rwxr-xr-x", "mtime": datetime.now().strftime("%Y-%m-%d %H:%M:%S")},
-}
-
-def populate_predefined_users(fs):
-    for user, data in PREDEFINED_USERS.items():
-        home_dir = data["home"]
-        if home_dir not in fs:
-            fs[home_dir] = {"type": "dir", "contents": [], "owner": user, "permissions": "rwxr-xr-x", "mtime": datetime.now().strftime("%Y-%m-%d %H:%M:%S")}
-        for file_name, content in USER_FILES[user].items():
-            full_path = os.path.join(home_dir, file_name)
-            fs[full_path] = {"type": "file", "content": content, "owner": user, "permissions": "rw-r--r--" if not file_name.startswith(".trap_") else "rwxrwxrwx", "mtime": datetime.now().strftime("%Y-%m-%d %H:%M:%S")}
-            if home_dir in fs and file_name not in fs[home_dir]["contents"]:
-                fs[home_dir]["contents"].append(file_name)
-    return fs
-
-def add_vulnerabilities(fs):
-    vulnerable_files = ["/tmp/suspicious.sh", "/var/www/html/config.php", "/home/admin/credentials.txt", "/home/dbadmin/mysql_creds.txt"]
-    for path in vulnerable_files:
-        if path not in fs:
-            fs[path] = {"type": "file", "content": f"Vulnerable file at {path}", "owner": "root", "permissions": "rwxrwxrwx", "mtime": datetime.now().strftime("%Y-%m-%d %H:%M:%S")}
-
-def trigger_alert(session_id, event_type, details, client_ip, username, location=None):
-    geo_info = ipapi.location(client_ip) if location is None else location
-    location_str = f" (Location: {geo_info.get('city', 'Unknown')}, {geo_info.get('country', 'Unknown')})" if geo_info else ""
-    logger.warning(f"{event_type} - {details}{location_str} from {client_ip} ({username})", extra={'client_ip': client_ip, 'session_id': session_id})
-    try:
-        with sqlite3.connect(DB_NAME) as conn:
-            conn.execute(
-                "INSERT INTO events (timestamp, ip, username, event_type, details) VALUES (?, ?, ?, ?, ?)",
-                (datetime.now().strftime("%Y-%m-%d %H:%M:%S"), client_ip, username, event_type, f"{details}{location_str}")
-            )
-    except sqlite3.Error as e:
-        logger.error(f"Event log error: {e}", extra={'client_ip': client_ip, 'session_id': session_id})
-
-def check_bruteforce(client_ip, username, password):
-    with _brute_force_lock:
-        key = (client_ip, username)
-        now = time.time()
-        attempts = _brute_force_attempts.get(key, [])
-        attempts = [t for t in attempts if now - t < BRUTE_FORCE_WINDOW]
-        attempts.append(now)
-        _brute_force_attempts[key] = attempts
-        if len(attempts) >= BRUTE_FORCE_THRESHOLD and key not in _brute_force_alerted:
-            trigger_alert(None, "Brute Force Attempt", f"Excessive login attempts from {client_ip} for {username}", client_ip, "unknown")
-            _brute_force_alerted.add(key)
-        return len(attempts) < BRUTE_FORCE_THRESHOLD
-
-def detect_port_scan(client_ip):
-    now = time.time()
-    attempts = _scan_attempts.get(client_ip, [])
-    attempts = [t for t in attempts if now - t < 60]  # Fenêtre de 1 minute
-    attempts.append(now)
-    _scan_attempts[client_ip] = attempts
-    if len(attempts) >= PORT_SCAN_THRESHOLD:
-        trigger_alert(None, "Port Scan Detected", f"Possible port scan from {client_ip}", client_ip, "unknown")
-        return True
-    return False
-
-def cleanup_bruteforce_attempts():
-    while True:
-        with _brute_force_lock:
-            now = time.time()
-            _brute_force_attempts = {k: [t for t in v if now - t < BRUTE_FORCE_WINDOW] for k, v in _brute_force_attempts.items()}
-            _brute_force_alerted = {k for k in _brute_force_alerted if k in _brute_force_attempts and _brute_force_attempts[k]}
-            _scan_attempts = {k: [t for t in v if now - t < 60] for k, v in _scan_attempts.items()}
-        time.sleep(60)
-        logger.info("Bruteforce and scan attempts cleaned up", extra={'client_ip': 'N/A', 'session_id': 'N/A'})
-
-def cleanup_trap_files():
-    while True:
-        with fs_lock:
-            for path in list(FS.keys()):
-                if path.endswith(".trap_") and random.random() < 0.1:  # 10% de chance par cycle
-                    parent_dir = "/".join(path.split("/")[:-1]) or "/"
-                    if parent_dir in FS and path.split("/")[-1] in FS[parent_dir]["contents"]:
-                        FS[parent_dir]["contents"].remove(path.split("/")[-1])
-                    del FS[path]
-            save_filesystem(FS)
-        time.sleep(TRAP_CLEANUP_INTERVAL)
-        logger.info("Trap files cleaned up", extra={'client_ip': 'N/A', 'session_id': 'N/A'})
-
-def calculate_risk_score(commands):
-    score = 0
-    patterns = {
-        r"rm\s+-rf": 20,
-        r"wget|curl": 15,
-        r"chmod\s+.*777": 10,
-        r"cat\s+.*(credentials|pass)": 15,
-        r"nmap|ping\s+.*\d+\.\d+\.\d+\.\d+": 10
-    }
-    for cmd in commands:
-        for pattern, points in patterns.items():
-            if re.search(pattern, cmd.lower()):
-                score += points
-    return min(score, 100)  # Cap à 100
-
-def generate_pdf_report(report_type):
+# Rapports
+def generate_report(period):
     pdf = FPDF()
     pdf.add_page()
+    pdf.set_font("Arial", "B", 16)
+    pdf.cell(0, 10, f"System Activity Report - {period}", 0, 1, "C")
     pdf.set_font("Arial", size=12)
-    now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-    period = {
-        "15min": "Last 15 minutes",
-        "hourly": "Last hour",
-        "weekly": "Last week"
-    }.get(report_type, "Unknown period")
-    pdf.cell(200, 10, txt=f"Honeypot Report - {period} ({now})", ln=True, align="C")
-    pdf.ln(10)
+    start_time = (datetime.now() - timedelta(minutes=15 if period == "15min" else 60 if period == "hourly" else 10080)).strftime("%Y-%m-%d %H:%M:%S")
+    pdf.cell(0, 10, f"Period: {start_time} to {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}", 0, 1)
     try:
         with sqlite3.connect(DB_NAME) as conn:
-            conn.row_factory = sqlite3.Row
             cur = conn.cursor()
-            time_filter = {
-                "15min": "WHERE timestamp >= datetime('now', '-15 minutes')",
-                "hourly": "WHERE timestamp >= datetime('now', '-1 hour')",
-                "weekly": "WHERE timestamp >= datetime('now', '-7 days')"
-            }.get(report_type, "")
-            cur.execute(f"SELECT * FROM events {time_filter} ORDER BY timestamp DESC")
-            events = cur.fetchall()
-            for event in events:
-                pdf.cell(200, 10, txt=f"{event['timestamp']} - {event['event_type']}: {event['details']}", ln=True)
+            cur.execute("SELECT COUNT(*) FROM login_attempts WHERE timestamp > ?", (start_time,))
+            login_count = cur.fetchone()[0]
+            pdf.cell(0, 10, f"Total Login Attempts: {login_count}", 0, 1)
+            cur.execute(
+                "SELECT ip, COUNT(*) as count FROM login_attempts WHERE timestamp > ? GROUP BY ip ORDER BY count DESC LIMIT 5",
+                (start_time,)
+            )
+            for ip, count in cur.fetchall():
+                pdf.cell(0, 10, f"IP: {ip} - {count} attempts", 0, 1)
+            cur.execute(
+                "SELECT command, COUNT(*) as count FROM commands WHERE timestamp > ? GROUP BY command ORDER BY count DESC LIMIT 5",
+                (start_time,)
+            )
+            for cmd, count in cur.fetchall():
+                pdf.cell(0, 10, f"Command: {cmd} - {count} executions", 0, 1)
+            cur.execute(
+                "SELECT timestamp, ip, username, event_type, details FROM events WHERE timestamp > ? ORDER BY timestamp DESC LIMIT 10",
+                (start_time,)
+            )
+            for timestamp, ip, username, event_type, details in cur.fetchall():
+                pdf.cell(0, 10, f"{timestamp} - {ip} ({username}): {event_type} - {details}", 0, 1)
     except sqlite3.Error as e:
-        pdf.cell(200, 10, txt=f"Error generating report: {e}", ln=True)
-    pdf_output = f"report_{report_type}_{now}.pdf"
-    pdf.output(pdf_output)
-    return pdf_output
+        print(f"[!] Report error: {e}")
+    report_filename = f"{period}_report_{datetime.now().strftime('%Y%m%d_%H%M%S')}.pdf"
+    pdf.output(report_filename)
+    return report_filename
 
-def send_report(report_path, report_type):
-    msg = MIMEMultipart()
-    msg['From'] = ALERT_FROM
-    msg['To'] = ALERT_TO
-    msg['Subject'] = f"Honeypot Report - {report_type}"
-    with open(report_path, "rb") as f:
-        part = MIMEApplication(f.read(), Name=os.path.basename(report_path))
-        part['Content-Disposition'] = f'attachment; filename="{os.path.basename(report_path)}"'
-        msg.attach(part)
-    try:
-        with smtplib.SMTP(SMTP_HOST, SMTP_PORT) as server:
-            server.starttls()
-            server.login(SMTP_USER, SMTP_PASS)
-            server.send_message(msg)
-        logger.info(f"Report {report_type} sent successfully", extra={'client_ip': 'N/A', 'session_id': 'N/A'})
-    except Exception as e:
-        logger.error(f"Failed to send report {report_type}: {e}", extra={'client_ip': 'N/A', 'session_id': 'N/A'})
-    finally:
-        os.remove(report_path)
-
-def schedule_reports():
+def send_weekly_report():
     while True:
         now = datetime.now()
-        if now.minute % 15 == 0 and now.second < 5:  # Toutes les 15 minutes
-            send_report(generate_pdf_report("15min"), "15min")
-        if now.minute == 0 and now.second < 5:  # Toutes les heures
-            send_report(generate_pdf_report("hourly"), "hourly")
-        if now.weekday() == 0 and now.hour == 0 and now.minute == 0 and now.second < 5:  # Chaque lundi à minuit
-            send_report(generate_pdf_report("weekly"), "weekly")
-        time.sleep(5)
-        logger.info("Report scheduling cycle completed", extra={'client_ip': 'N/A', 'session_id': 'N/A'})
+        if now.weekday() == 0 and now.hour == 8:
+            report_filename = generate_report("weekly")
+            subject = f"Weekly System Report - {datetime.now().strftime('%Y-%m-%d')}"
+            body = "Attached is the weekly system activity report."
+            msg = MIMEMultipart()
+            msg["From"] = ALERT_FROM
+            msg["To"] = ALERT_TO
+            msg["Subject"] = subject
+            msg.attach(MIMEText(body, "plain"))
+            with open(report_filename, "rb") as f:
+                part = MIMEApplication(f.read(), Name=os.path.basename(report_filename))
+                part["Content-Disposition"] = f'attachment; filename="{os.path.basename(report_filename)}"'
+                msg.attach(part)
+            try:
+                with smtplib.SMTP(SMTP_HOST, SMTP_PORT) as smtp:
+                    smtp.starttls()
+                    smtp.login(SMTP_USER, SMTP_PASS)
+                    smtp.send_message(msg)
+                print(f"Weekly report sent: {report_filename}")
+            except Exception as e:
+                print(f"Weekly report email error: {e}")
+            finally:
+                if os.path.exists(report_filename):
+                    os.remove(report_filename)
+        time.sleep(3600)
 
-def detect_attacker_os(client_ip, transport):
-    banner = transport.get_banner().decode().lower() if transport and transport.get_banner() else ""
-    if "windows" in banner or "putty" in banner:
-        return "Windows"
-    elif "linux" in banner or "kali" in banner or "ubuntu" in banner or "debian" in banner:
-        return "Linux"
-    elif "mac" in banner or "darwin" in banner:
-        return "macOS"
-    return "Unknown"
+def send_periodic_report():
+    while True:
+        time.sleep(900)
+        report_filename = generate_report("15min")
+        body = f"15-Minute Activity Report - {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}"
+        trigger_alert(-1, "15min Activity Report", body, "system", "system")
+        if os.path.exists(report_filename):
+            os.remove(report_filename)
 
-def get_completions(cmd, current_dir, username, fs, command_history):
-    completions = set()
-    cmd_parts = cmd.split()
-    if not cmd_parts:
-        return list(COMMAND_OPTIONS.keys())
-    prefix = cmd_parts[-1]
-    if len(cmd_parts) == 1:  # Autocomplétion des commandes
-        for command in COMMAND_OPTIONS:
-            if command.startswith(prefix):
-                completions.add(command)
-        for option in COMMAND_OPTIONS.get(prefix, []):
-            completions.add(f"{prefix} {option}")
-    else:  # Autocomplétion des chemins ou arguments
-        cmd_name = cmd_parts[0].lower()
-        if cmd_name in ["ls", "cd", "cat", "rm", "find", "vim", "nano"] and current_dir in fs and fs[current_dir]["type"] == "dir":
-            base_path = current_dir if current_dir != "/" else ""
-            partial_path = prefix if not prefix.startswith("/") else prefix
-            if not partial_path.startswith("/"):
-                partial_path = os.path.normpath(os.path.join(current_dir, partial_path))
-            dir_path = "/".join(partial_path.split("/")[:-1]) or "/"
-            item_prefix = partial_path.split("/")[-1] if dir_path in fs else ""
-            if dir_path in fs:
-                for item in fs[dir_path]["contents"]:
-                    full_path = os.path.join(dir_path, item)
-                    if full_path in fs:
-                        if fs[full_path]["type"] == "dir" and cmd_name in ["cd", "ls"]:
-                            if item.startswith(item_prefix):
-                                completions.add(item + "/")
-                        elif fs[full_path]["type"] == "file" and cmd_name in ["cat", "rm", "vim", "nano"]:
-                            if item.startswith(item_prefix):
-                                completions.add(item)
-    return sorted(list(completions))
+# Nettoyage des fichiers pièges
+def cleanup_trap_files(fs):
+    while True:
+        current_time = time.time()
+        for path in list(fs.keys()):
+            if ".trap_" in path and fs[path].get("expires", current_time) < current_time:
+                parent_dir = "/".join(path.split("/")[:-1]) or "/"
+                if parent_dir in fs and path.split("/")[-1] in fs[parent_dir]["contents"]:
+                    fs[parent_dir]["contents"].remove(path.split("/")[-1])
+                del fs[path]
+                save_filesystem(fs)
+        time.sleep(3600)
 
-def autocomplete(cmd, current_dir, username, fs, chan, command_history):
-    completions = get_completions(cmd, current_dir, username, fs, command_history)
-    if len(completions) == 1:
-        return completions[0]
-    elif len(completions) > 1:
-        common_prefix = os.path.commonprefix(completions)
-        if common_prefix and common_prefix != cmd.split()[-1]:
-            return cmd[:cmd.rfind(cmd.split()[-1])] + common_prefix
-        chan.send(b"\r\n" + "\n".join(completions).encode() + b"\r\n" + f"{cmd}".encode())
-    return cmd
-
-def process_command(cmd, current_dir, username, fs, client_ip, session_id, session_log, command_history, chan, jobs, cmd_count, transport):
-    if not cmd:
-        return "", current_dir, jobs, cmd_count
-
-    cmd_parts = cmd.split(maxsplit=1)
-    cmd_name = cmd_parts[0].lower()
-    arg_str = cmd_parts[1] if len(cmd_parts) > 1 else ""
-    output = ""
+# Traitement des commandes
+def process_command(cmd, current_dir, username, fs, client_ip, session_id, session_log, command_history, chan, jobs=None, cmd_count=0):
+    if not cmd.strip():
+        return "", current_dir, jobs or [], cmd_count
     new_dir = current_dir
-
-    # Mise à jour du score de risque
-    with _brute_force_lock:
-        _risk_scores[session_id] = _risk_scores.get(session_id, 0) + calculate_risk_score([cmd])
-        if _risk_scores[session_id] >= RISK_SCORE_THRESHOLD:
-            trigger_alert(session_id, "High Risk Activity", f"Risk score {_risk_scores[session_id]} exceeded threshold", client_ip, username)
-
+    output = ""
+    cmd_parts = cmd.strip().split()
+    cmd_name = cmd_parts[0].lower()
+    arg_str = " ".join(cmd_parts[1:]) if len(cmd_parts) > 1 else ""
+    jobs = jobs or []
+    session_log.append(f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] {username}@{client_ip}: {cmd}")
+    log_session_activity(session_id, client_ip, username, cmd, output)
+    command_seq = " ".join(command_history[-5:] + [cmd])
+    malicious_patterns = {"rm -rf /": 10, "rm -rf": 8, "wget": 3, "curl": 3, "format": 7, "reboot": 4, "nc -l": 8, "exploit_db": 8, "metasploit": 8, "reverse_shell": 8, "whoami.*sudo": 6}
+    risk_score = sum(malicious_patterns.get(pattern, 0) for pattern in malicious_patterns if pattern in command_seq.lower())
+    if risk_score > 5:
+        trigger_alert(session_id, "High Risk Command", f"Command sequence '{command_seq}' scored {risk_score} risk points", client_ip, username)
     if cmd_name in ["ls", "dir"]:
-        args = arg_str.split()
-        show_all = "-a" in args or "-la" in args
-        long_format = "-l" in args or "-la" in args or "-lh" in args
-        human_readable = "-lh" in args
-        target_dir = arg_str.replace("-l", "").replace("-a", "").replace("-la", "").replace("-lh", "").strip() or current_dir
-        if not target_dir.startswith("/"):
-            target_dir = os.path.normpath(os.path.join(current_dir, target_dir))
-        if target_dir in fs and fs[target_dir]["type"] == "dir":
-            contents = fs[target_dir]["contents"]
-            if long_format:
-                output = "total {}\n".format(len(contents))
-                for item in contents:
-                    full_path = os.path.join(target_dir, item)
+        path = arg_str if arg_str else current_dir
+        path = os.path.normpath(path if path.startswith("/") else f"{current_dir}/{path}")
+        if path in fs and fs[path]["type"] == "dir" and "contents" in fs[path]:
+            if "-l" in cmd_parts:
+                lines = []
+                for item in fs[path]["contents"]:
+                    full_path = f"{path}/{item}" if path != "/" else f"/{item}"
                     if full_path in fs:
-                        item_data = fs[full_path]
-                        perms = item_data["permissions"]
-                        owner = item_data["owner"]
-                        mtime = item_data["mtime"]
-                        size = len(str(item_data.get("content", ""))) if item_data.get("content") and not callable(item_data.get("content")) else 0
-                        if human_readable and size > 0:
-                            size = f"{size}B"
-                        output += f"{perms}  1 {owner} {owner} {size:>6} {mtime} {item}\n"
-                        if item.startswith(".trap_"):
-                            trigger_alert(session_id, "Trap File Access", f"Accessed {full_path}", client_ip, username)
+                        item_type = "d" if fs[full_path]["type"] == "dir" else "-"
+                        perms = fs[full_path].get("permissions", "rw-r--r--")
+                        size = len(fs[full_path].get("content", "") if fs[full_path]["type"] == "file" and not callable(fs[full_path]["content"]) else "") if fs[full_path]["type"] == "file" else 0
+                        mod_time = fs[full_path].get("mtime", datetime.now().strftime("%b %d %H:%M"))
+                        lines.append(f"{item_type}{perms}  1 {fs[full_path].get('owner', username)} {username} {size:>8} {mod_time} {item}")
+                output = "\n".join(lines)
             else:
-                output = " ".join(contents) if contents else "Directory is empty"
+                if random.random() < 0.3:
+                    trap_file = f".trap_{random.randint(1, 1000)}.txt"
+                    if trap_file not in fs[path]["contents"]:
+                        fs[path]["contents"].append(trap_file)
+                        fs[f"{path}/{trap_file}"] = {"type": "file", "content": f"Data {random.randint(1, 1000)}", "owner": "root", "permissions": "rw-r--r--", "mtime": datetime.now().strftime("%Y-%m-%d %H:%M:%S"), "expires": time.time() + 3600}
+                        trigger_alert(session_id, "Trap Triggered", f"User {username} triggered trap {trap_file} in {path}", client_ip, username)
+                output = " ".join(f for f in fs[path]["contents"] if not f.startswith(".trap_") or fs.get(f"{path}/{f}", {}).get("expires", 0) > time.time())
         else:
-            output = f"ls: cannot access '{target_dir}': No such file or directory"
-
+            output = f"ls: cannot access '{arg_str}': No such file or directory"
     elif cmd_name == "cd":
-        target_dir = arg_str.strip() or "/"
-        if not target_dir.startswith("/"):
-            target_dir = os.path.normpath(os.path.join(current_dir, target_dir))
-        if target_dir in fs and fs[target_dir]["type"] == "dir":
-            if username not in PREDEFINED_USERS or target_dir.startswith(PREDEFINED_USERS[username]["home"]) or "sudo" in PREDEFINED_USERS[username].get("groups", []):
-                new_dir = target_dir
-            else:
-                output = f"cd: permission denied: {target_dir}"
+        path = arg_str if arg_str else f"/home/{username}"
+        if path.startswith("~"):
+            path = path.replace("~", f"/home/{username}", 1)
+        path = os.path.normpath(path if path.startswith("/") else f"{current_dir}/{path}")
+        if path in fs and fs[path]["type"] == "dir":
+            new_dir = path
         else:
-            output = f"cd: no such directory: {target_dir}"
-
+            output = f"cd: {arg_str}: No such file or directory"
     elif cmd_name == "cat":
-        target_file = arg_str.strip()
-        if not target_file.startswith("/"):
-            target_file = os.path.normpath(os.path.join(current_dir, target_file))
-        if target_file in fs and fs[target_file]["type"] == "file":
-            if username not in PREDEFINED_USERS or target_file.startswith(PREDEFINED_USERS[username]["home"]) or "sudo" in PREDEFINED_USERS[username].get("groups", []):
-                content = fs[target_file].get("content", "")
-                if callable(content):
-                    output = content()
-                else:
-                    output = content
-                if target_file.startswith(".trap_"):
-                    trigger_alert(session_id, "Trap File Access", f"Accessed {target_file}", client_ip, username)
-            else:
-                output = f"cat: {target_file}: Permission denied"
+        if not arg_str:
+            output = "cat: missing operand"
         else:
-            output = f"cat: {target_file}: No such file or directory"
-
-    elif cmd_name == "vim" or cmd_name == "nano":
-        chan.send(b"\r\nEntering editor mode (simulated). Type content, then :wq to save or :q to exit.\r\n")
-        editor_buffer = ""
-        while True:
-            char = read_char(chan)
-            if not char:
-                continue
-            if char == "\r" or char == "\n":
-                chan.send(b"\r\n")
-            elif char == ":" and editor_buffer.endswith("wq"):
-                target_file = arg_str.strip()
-                if not target_file.startswith("/"):
-                    target_file = os.path.normpath(os.path.join(current_dir, target_file))
-                if target_file not in fs:
-                    fs[target_file] = {"type": "file", "content": editor_buffer[:-3], "owner": username, "permissions": "rw-r--r--", "mtime": datetime.now().strftime("%Y-%m-%d %H:%M:%S")}
-                    parent_dir = "/".join(target_file.split("/")[:-1]) or "/"
-                    if parent_dir in fs:
-                        fs[parent_dir]["contents"].append(target_file.split("/")[-1])
-                    save_filesystem(fs)
-                    trigger_alert(session_id, "File Edited", f"Edited {target_file} with {len(editor_buffer)} chars", client_ip, username)
-                break
-            elif char == ":" and editor_buffer.endswith("q"):
-                break
+            path = arg_str
+            if path.startswith("~"):
+                path = path.replace("~", f"/home/{username}", 1)
+            if not path.startswith("/"):
+                path = f"{current_dir}/{arg_str}" if current_dir != "/" else f"/{arg_str}"
+            path = os.path.normpath(path)
+            if path in SENSITIVE_FILES:
+                trigger_alert(session_id, "Sensitive File Access", f"Accessed file: {path}", client_ip, username)
+            if path == "/etc/shadow" and username != "root":
+                output = "cat: /etc/shadow: Permission denied"
+                trigger_alert(session_id, "Permission Denied", f"Attempted to access /etc/shadow", client_ip, username)
+            elif path in fs and fs[path]["type"] == "file":
+                content = fs[path]["content"]() if callable(fs[path]["content"]) else fs[path]["content"]
+                output = content
+                trigger_alert(session_id, "File Access", f"Read file: {path}", client_ip, username)
             else:
-                editor_buffer += char
-                chan.send(char.encode())
-        return "", current_dir, jobs, cmd_count
-
+                output = f"cat: {arg_str}: No such file or directory"
     elif cmd_name == "rm":
-        target = arg_str.strip()
-        if not target.startswith("/"):
-            target = os.path.normpath(os.path.join(current_dir, target))
-        if target in fs:
-            if username not in PREDEFINED_USERS or target.startswith(PREDEFINED_USERS[username]["home"]) or "sudo" in PREDEFINED_USERS[username].get("groups", []):
-                parent_dir = "/".join(target.split("/")[:-1]) or "/"
-                if parent_dir in fs and target in fs[parent_dir]["contents"]:
-                    fs[parent_dir]["contents"].remove(target.split("/")[-1])
-                del fs[target]
-                save_filesystem(fs)
-                output = f"rm: removed '{target}'"
-                trigger_alert(session_id, "File Removed", f"Removed {target}", client_ip, username)
-            else:
-                output = f"rm: cannot remove '{target}': Permission denied"
+        if not arg_str:
+            output = "rm: missing operand"
         else:
-            output = f"rm: cannot remove '{target}': No such file or directory"
-
+            path = arg_str
+            if not path.startswith("/"):
+                path = f"{current_dir}/{arg_str}" if current_dir != "/" else f"/{arg_str}"
+            path = os.path.normpath(path)
+            if path in fs and fs[path]["type"] == "file":
+                parent_dir = "/".join(path.split("/")[:-1]) or "/"
+                if "-r" in cmd_parts and fs[path]["type"] == "dir":
+                    trigger_alert(session_id, "Recursive Delete Attempt", f"Attempted rm -r on {path}", client_ip, username)
+                if parent_dir in fs and "contents" in fs[parent_dir] and path.split("/")[-1] in fs[parent_dir]["contents"]:
+                    fs[parent_dir]["contents"].remove(path.split("/")[-1])
+                del fs[path]
+                save_filesystem(fs)
+                output = ""
+                trigger_alert(session_id, "File Deleted", f"Removed file: {path}", client_ip, username)
+            else:
+                output = f"rm: cannot remove '{arg_str}': No such file or directory"
     elif cmd_name == "mkdir":
-        target_dir = arg_str.strip()
-        if not target_dir.startswith("/"):
-            target_dir = os.path.normpath(os.path.join(current_dir, target_dir))
-        if target_dir not in fs:
-            if username not in PREDEFINED_USERS or target_dir.startswith(PREDEFINED_USERS[username]["home"]) or "sudo" in PREDEFINED_USERS[username].get("groups", []):
-                fs[target_dir] = {"type": "dir", "contents": [], "owner": username, "permissions": "rwxr-xr-x", "mtime": datetime.now().strftime("%Y-%m-%d %H:%M:%S")}
-                parent_dir = "/".join(target_dir.split("/")[:-1]) or "/"
-                if parent_dir in fs:
-                    fs[parent_dir]["contents"].append(target_dir.split("/")[-1])
-                save_filesystem(fs)
-                output = f"mkdir: created directory '{target_dir}'"
-                trigger_alert(session_id, "Directory Created", f"Created {target_dir}", client_ip, username)
-            else:
-                output = f"mkdir: cannot create directory '{target_dir}': Permission denied"
+        if not arg_str:
+            output = "mkdir: missing operand"
         else:
-            output = f"mkdir: cannot create directory '{target_dir}': File exists"
-
-    elif cmd_name == "touch":
-        target_file = arg_str.strip()
-        if not target_file.startswith("/"):
-            target_file = os.path.normpath(os.path.join(current_dir, target_file))
-        if target_file not in fs:
-            if username not in PREDEFINED_USERS or target_file.startswith(PREDEFINED_USERS[username]["home"]) or "sudo" in PREDEFINED_USERS[username].get("groups", []):
-                fs[target_file] = {"type": "file", "content": "", "owner": username, "permissions": "rw-r--r--", "mtime": datetime.now().strftime("%Y-%m-%d %H:%M:%S")}
-                parent_dir = "/".join(target_file.split("/")[:-1]) or "/"
-                if parent_dir in fs:
-                    fs[parent_dir]["contents"].append(target_file.split("/")[-1])
+            path = arg_str
+            if not path.startswith("/"):
+                path = f"{current_dir}/{arg_str}" if current_dir != "/" else f"/{arg_str}"
+            path = os.path.normpath(path)
+            if path not in fs:
+                fs[path] = {"type": "dir", "contents": [], "owner": username, "permissions": "rwxr-xr-x", "mtime": datetime.now().strftime("%Y-%m-%d %H:%M:%S")}
+                parent_dir = "/".join(path.split("/")[:-1]) or "/"
+                if parent_dir in fs and "contents" in fs[parent_dir]:
+                    fs[parent_dir]["contents"].append(path.split("/")[-1])
                 save_filesystem(fs)
-                output = f"touch: created file '{target_file}'"
-                trigger_alert(session_id, "File Created", f"Created {target_file}", client_ip, username)
+                output = ""
+                trigger_alert(session_id, "Directory Created", f"Created directory {path}", client_ip, username)
             else:
-                output = f"touch: cannot create file '{target_file}': Permission denied"
+                output = f"mkdir: cannot create directory '{arg_str}': File exists"
+    elif cmd_name == "rmdir":
+        if not arg_str:
+            output = "rmdir: missing operand"
         else:
-            output = f"touch: cannot create file '{target_file}': File exists"
-
+            path = arg_str
+            if not path.startswith("/"):
+                path = f"{current_dir}/{arg_str}" if current_dir != "/" else f"/{arg_str}"
+            path = os.path.normpath(path)
+            if path in fs and fs[path]["type"] == "dir" and not fs[path]["contents"]:
+                parent_dir = "/".join(path.split("/")[:-1]) or "/"
+                if parent_dir in fs and "contents" in fs[parent_dir] and path.split("/")[-1] in fs[parent_dir]["contents"]:
+                    fs[parent_dir]["contents"].remove(path.split("/")[-1])
+                del fs[path]
+                save_filesystem(fs)
+                output = ""
+                trigger_alert(session_id, "Directory Removed", f"Removed directory: {path}", client_ip, username)
+            else:
+                output = f"rmdir: failed to remove '{arg_str}': Directory not empty or does not exist"
+    elif cmd_name in ["cp", "mv"]:
+        if len(cmd_parts) >= 3:
+            src = os.path.normpath(cmd_parts[1] if cmd_parts[1].startswith("/") else f"{current_dir}/{cmd_parts[1]}")
+            dst = os.path.normpath(cmd_parts[2] if cmd_parts[2].startswith("/") else f"{current_dir}/{cmd_parts[2]}")
+            if src in fs and fs[src]["type"] == "file":
+                fs[dst] = fs[src].copy()
+                fs[dst]["owner"] = username
+                fs[dst]["mtime"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+                parent_dir = "/".join(dst.split("/")[:-1]) or "/"
+                if parent_dir in fs and "contents" in fs[parent_dir] and dst.split("/")[-1] not in fs[parent_dir]["contents"]:
+                    fs[parent_dir]["contents"].append(dst.split("/")[-1])
+                if cmd_name == "mv":
+                    parent_src_dir = "/".join(src.split("/")[:-1]) or "/"
+                    if parent_src_dir in fs and "contents" in fs[parent_src_dir] and src.split("/")[-1] in fs[parent_src_dir]["contents"]:
+                        fs[parent_src_dir]["contents"].remove(src.split("/")[-1])
+                    del fs[src]
+                save_filesystem(fs)
+                output = f"{cmd_name}: {'copied' if cmd_name == 'cp' else 'moved'} '{src}' to '{dst}'"
+                trigger_alert(session_id, f"File {cmd_name.upper()}", f"{'Copied' if cmd_name == 'cp' else 'Moved'} file: {src} to {dst}", client_ip, username)
+            else:
+                output = f"{cmd_name}: cannot stat '{cmd_parts[1]}': No such file or directory"
+        else:
+            output = f"{cmd_name}: missing file operand"
+    elif cmd_name == "chmod":
+        if len(cmd_parts) >= 3 and cmd_parts[1] in ["+x", "-w", "755", "644"]:
+            path = os.path.normpath(cmd_parts[2] if cmd_parts[2].startswith("/") else f"{current_dir}/{cmd_parts[2]}")
+            if path in fs:
+                fs[path]["permissions"] = cmd_parts[1] if cmd_parts[1] in ["+x", "-w"] else ("rwxr-xr-x" if cmd_parts[1] == "755" else "rw-r--r--")
+                save_filesystem(fs)
+                output = ""
+                trigger_alert(session_id, "Permission Change", f"Changed permissions of {path} to {cmd_parts[1]}", client_ip, username)
+            else:
+                output = f"chmod: cannot access '{cmd_parts[2]}': No such file or directory"
+        else:
+            output = "chmod: invalid syntax or missing operand"
+    elif cmd_name == "chown":
+        if len(cmd_parts) >= 3 and cmd_parts[1] in PREDEFINED_USERS:
+            path = os.path.normpath(cmd_parts[2] if cmd_parts[2].startswith("/") else f"{current_dir}/{cmd_parts[2]}")
+            if path in fs:
+                fs[path]["owner"] = cmd_parts[1]
+                save_filesystem(fs)
+                output = ""
+                trigger_alert(session_id, "Owner Change", f"Changed owner of {path} to {cmd_parts[1]}", client_ip, username)
+            else:
+                output = f"chown: cannot access '{cmd_parts[2]}': No such file or directory"
+        else:
+            output = "chown: invalid user or missing operand"
+    elif cmd_name == "kill":
+        if arg_str:
+            output = f"kill: process {arg_str} terminated (simulated)"
+            trigger_alert(session_id, "Process Kill", f"Attempted to kill process {arg_str}", client_ip, username)
+        else:
+            output = "kill: usage: kill -9 <pid>"
     elif cmd_name == "ping":
-        target = arg_str.split()[0] if arg_str else "8.8.8.8"
-        if target in FAKE_NETWORK_HOSTS:
-            output = f"PING {target} ({target}) 56(84) bytes of data.\n64 bytes from {target}: icmp_seq=1 ttl=64 time=10.5 ms\n--- {target} ping statistics ---\n1 packets transmitted, 1 received, 0% packet loss, time 0ms"
+        if not arg_str:
+            output = "ping: missing host operand"
         else:
-            output = f"ping: unknown host {target}"
-        detect_port_scan(client_ip)
-
+            host = arg_str.split()[0]
+            if host in [h["name"] for h in FAKE_NETWORK_HOSTS.values()] or host in FAKE_NETWORK_HOSTS:
+                output = f"PING {host} (192.168.1.x) 56(84) bytes of data.\n"
+                for _ in range(4):
+                    output += f"64 bytes from {host}: icmp_seq={_ + 1} ttl=64 time={random.uniform(0.1, 2.0):.2f} ms\n"
+                output += f"\n--- {host} ping statistics ---\n4 packets transmitted, 4 received, 0% packet loss"
+            else:
+                output = f"ping: {host}: Name or service not known"
+            trigger_alert(session_id, "Network Command", f"Pinged host: {host}", client_ip, username)
     elif cmd_name == "nmap":
-        output = get_dynamic_network_scan()
-        detect_port_scan(client_ip)
-
+        if not arg_str:
+            output = "nmap: missing target"
+        else:
+            output = get_dynamic_network_scan()
+            trigger_alert(session_id, "Network Scan", f"Executed nmap with args: {arg_str}", client_ip, username)
     elif cmd_name == "arp":
         output = get_dynamic_arp()
-
+        trigger_alert(session_id, "Command Executed", "Displayed ARP table", client_ip, username)
+    elif cmd_name == "curl" or cmd_name == "wget":
+        if not arg_str:
+            output = f"{cmd_name}: missing URL"
+        else:
+            output = f"{cmd_name}: downloaded data from {arg_str} (simulated)"
+            trigger_alert(session_id, "Network Download Attempt", f"Attempted {cmd_name}: {arg_str}", client_ip, username)
+    elif cmd_name == "telnet":
+        if not arg_str:
+            output = "telnet: missing host"
+        else:
+            host = arg_str.split()[0]
+            output = f"Trying {host}...\nConnection refused"
+            trigger_alert(session_id, "Telnet Attempt", f"Attempted telnet to {host}", client_ip, username)
+    elif cmd_name == "scp":
+        if not arg_str:
+            output = "scp: missing arguments"
+        else:
+            output = "scp: connection refused (simulated)"
+            trigger_alert(session_id, "File Transfer Attempt", f"Attempted scp: {arg_str}", client_ip, username)
+    elif cmd_name == "find":
+        if not arg_str:
+            output = "find: missing argument"
+        else:
+            path = arg_str.split()[-1] if arg_str else current_dir
+            if path.startswith("~"):
+                path = path.replace("~", f"/home/{username}", 1)
+            if not path.startswith("/"):
+                path = f"{current_dir}/{path}" if current_dir != "/" else f"/{path}"
+            path = os.path.normpath(path)
+            if path in fs and fs[path]["type"] == "dir" and "contents" in fs[path]:
+                results = []
+                def recursive_find(p):
+                    for item in fs[p]["contents"]:
+                        full_path = f"{p}/{item}" if p != "/" else f"/{item}"
+                        if full_path in fs:
+                            if "-name" in arg_str and item in arg_str:
+                                results.append(full_path)
+                            if fs[full_path]["type"] == "dir" and "contents" in fs[full_path]:
+                                recursive_find(full_path)
+                recursive_find(path)
+                output = "\n".join(results)
+                trigger_alert(session_id, "Command Executed", f"Executed find in {path}", client_ip, username)
+            else:
+                output = f"find: '{path}': No such file or directory"
+    elif cmd_name == "grep":
+        if not arg_str:
+            output = "grep: missing pattern"
+        else:
+            parts = arg_str.split()
+            pattern = parts[0].strip("'\"")
+            files = parts[1:] if len(parts) > 1 else []
+            results = []
+            for file in files:
+                path = file if file.startswith("/") else f"{current_dir}/{file}"
+                path = os.path.normpath(path)
+                if path in fs and fs[path]["type"] == "file":
+                    content = fs[path]["content"]() if callable(fs[path]["content"]) else fs[path]["content"]
+                    for line in content.split("\n"):
+                        if pattern in line:
+                            results.append(f"{file}: {line}")
+            output = "\n".join(results) if results else f"grep: no matches for '{pattern}'"
+            trigger_alert(session_id, "Command Executed", f"Executed grep with pattern '{pattern}'", client_ip, username)
+    elif cmd_name == "touch":
+        if not arg_str:
+            output = "touch: missing file operand"
+        else:
+            path = arg_str
+            if not path.startswith("/"):
+                path = f"{current_dir}/{arg_str}" if current_dir != "/" else f"/{arg_str}"
+            path = os.path.normpath(path)
+            if path.startswith("/tmp/"):
+                fs[path] = {"type": "file", "content": "", "owner": username, "permissions": "rw-r--r--", "mtime": datetime.now().strftime("%Y-%m-%d %H:%M:%S")}
+                if "/tmp" in fs and "contents" in fs["/tmp"] and os.path.basename(path) not in fs["/tmp"]["contents"]:
+                    fs["/tmp"]["contents"].append(os.path.basename(path))
+                save_filesystem(fs)
+                output = ""
+                trigger_alert(session_id, "File Created", f"Created file: {path}", client_ip, username)
+            else:
+                output = f"touch: cannot touch '{arg_str}': Permission denied"
+    elif cmd_name == "apt-get":
+        if not arg_str:
+            output = "apt-get: missing command"
+        else:
+            if "install" in arg_str:
+                output = f"apt-get: installing package(s) {arg_str.split('install')[-1].strip()} (simulated)"
+            elif "update" in arg_str:
+                output = "apt-get: updating package lists (simulated)"
+            elif "upgrade" in arg_str:
+                output = "apt-get: upgrading packages (simulated)"
+            else:
+                output = f"apt-get: unknown command '{arg_str}'"
+            trigger_alert(session_id, "Package Manager Command", f"Executed apt-get: {cmd}", client_ip, username)
     elif cmd_name == "who":
         output = get_dynamic_who()
-
+        trigger_alert(session_id, "Command Executed", "Displayed user list", client_ip, username)
     elif cmd_name == "w":
         output = get_dynamic_w()
-
+        trigger_alert(session_id, "Command Executed", "Displayed user activity", client_ip, username)
     elif cmd_name == "top":
         output = get_dynamic_top()
-
-    elif cmd_name == "cp":
-        src, dest = [x.strip() for x in arg_str.split()[:2]]
-        if not src.startswith("/") and not dest.startswith("/"):
-            src = os.path.normpath(os.path.join(current_dir, src))
-            dest = os.path.normpath(os.path.join(current_dir, dest))
-        if src in fs and dest not in fs:
-            if username not in PREDEFINED_USERS or src.startswith(PREDEFINED_USERS[username]["home"]) or "sudo" in PREDEFINED_USERS[username].get("groups", []):
-                fs[dest] = fs[src].copy()
-                fs[dest]["content"] = fs[src].get("content", "")
-                fs[dest]["mtime"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-                parent_dir = "/".join(dest.split("/")[:-1]) or "/"
-                if parent_dir in fs:
-                    fs[parent_dir]["contents"].append(dest.split("/")[-1])
-                save_filesystem(fs)
-                output = f"cp: copied '{src}' to '{dest}'"
-                trigger_alert(session_id, "File Copied", f"Copied {src} to {dest}", client_ip, username)
-            else:
-                output = f"cp: cannot copy '{src}' to '{dest}': Permission denied"
-        else:
-            output = f"cp: cannot copy '{src}' to '{dest}': No such file or directory"
-
-    elif cmd_name == "mv":
-        src, dest = [x.strip() for x in arg_str.split()[:2]]
-        if not src.startswith("/") and not dest.startswith("/"):
-            src = os.path.normpath(os.path.join(current_dir, src))
-            dest = os.path.normpath(os.path.join(current_dir, dest))
-        if src in fs and dest not in fs:
-            if username not in PREDEFINED_USERS or src.startswith(PREDEFINED_USERS[username]["home"]) or "sudo" in PREDEFINED_USERS[username].get("groups", []):
-                fs[dest] = fs[src].copy()
-                fs[dest]["mtime"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-                parent_dir_src = "/".join(src.split("/")[:-1]) or "/"
-                parent_dir_dest = "/".join(dest.split("/")[:-1]) or "/"
-                if parent_dir_src in fs and src.split("/")[-1] in fs[parent_dir_src]["contents"]:
-                    fs[parent_dir_src]["contents"].remove(src.split("/")[-1])
-                if parent_dir_dest in fs:
-                    fs[parent_dir_dest]["contents"].append(dest.split("/")[-1])
-                del fs[src]
-                save_filesystem(fs)
-                output = f"mv: moved '{src}' to '{dest}'"
-                trigger_alert(session_id, "File Moved", f"Moved {src} to {dest}", client_ip, username)
-            else:
-                output = f"mv: cannot move '{src}' to '{dest}': Permission denied"
-        else:
-            output = f"mv: cannot move '{src}' to '{dest}': No such file or directory"
-
-    elif cmd_name == "chmod":
-        target, perm = [x.strip() for x in arg_str.split()[:2]]
-        if not target.startswith("/"):
-            target = os.path.normpath(os.path.join(current_dir, target))
-        if target in fs and perm in ["755", "644", "+x"]:
-            if username not in PREDEFINED_USERS or target.startswith(PREDEFINED_USERS[username]["home"]) or "sudo" in PREDEFINED_USERS[username].get("groups", []):
-                fs[target]["permissions"] = {"755": "rwxr-xr-x", "644": "rw-r--r--", "+x": "rwxr-xr-x" if "x" not in fs[target]["permissions"] else fs[target]["permissions"]}.get(perm, fs[target]["permissions"])
-                save_filesystem(fs)
-                output = f"chmod: changed permissions of '{target}' to {fs[target]['permissions']}"
-                trigger_alert(session_id, "Permission Changed", f"Changed permissions of {target} to {perm}", client_ip, username)
-            else:
-                output = f"chmod: cannot access '{target}': Permission denied"
-        else:
-            output = f"chmod: invalid argument or file not found"
-
-    elif cmd_name == "chown":
-        target, new_owner = [x.strip() for x in arg_str.split()[:2]]
-        if not target.startswith("/"):
-            target = os.path.normpath(os.path.join(current_dir, target))
-        if target in fs and new_owner in PREDEFINED_USERS:
-            if username not in PREDEFINED_USERS or target.startswith(PREDEFINED_USERS[username]["home"]) or "sudo" in PREDEFINED_USERS[username].get("groups", []):
-                fs[target]["owner"] = new_owner
-                save_filesystem(fs)
-                output = f"chown: changed owner of '{target}' to {new_owner}"
-                trigger_alert(session_id, "Owner Changed", f"Changed owner of {target} to {new_owner}", client_ip, username)
-            else:
-                output = f"chown: cannot access '{target}': Permission denied"
-        else:
-            output = f"chown: invalid argument or file not found"
-
-    elif cmd_name == "find":
-        output = "find: simulated search (results not implemented)"
-        trigger_alert(session_id, "Search Executed", f"Executed find {arg_str}", client_ip, username)
-
-    elif cmd_name == "grep":
-        output = "grep: simulated search (results not implemented)"
-        trigger_alert(session_id, "Search Executed", f"Executed grep {arg_str}", client_ip, username)
-
-    elif cmd_name == "tree":
-        target_dir = arg_str.strip() or current_dir
-        if not target_dir.startswith("/"):
-            target_dir = os.path.normpath(os.path.join(current_dir, target_dir))
-        if target_dir in fs and fs[target_dir]["type"] == "dir":
-            output = os.path.basename(target_dir) + "\n" + generate_tree_output(target_dir, fs)
-            trigger_alert(session_id, "Command Executed", f"Displayed tree for {target_dir}", client_ip, username)
-        else:
-            output = f"tree: {target_dir}: No such directory"
-
-    elif cmd_name == "service":
-        if not arg_str:
-            output = "service: missing service name"
-        else:
-            service = arg_str.split()[0]
-            if service in ["sshd", "nginx", "mysql"]:
-                action = arg_str.split()[1] if len(arg_str.split()) > 1 else "status"
-                output = f"service: {action}ing {service} (simulated)"
-                trigger_alert(session_id, "Service Command", f"Executed service {action} on {service}", client_ip, username)
-            else:
-                output = f"service: no such service '{service}'"
-
+        trigger_alert(session_id, "Command Executed", "Displayed top processes", client_ip, username)
+    elif cmd_name == "vim":
+        chan.send(b"Entering vim mode... Press :q to exit\r\n")
+        while True:
+            vim_input, jobs, _ = read_line_advanced(chan, ":", history=command_history, current_dir=current_dir, username=username, fs=fs, session_log=session_log, session_id=session_id, client_ip=client_ip, jobs=jobs, cmd_count=cmd_count)
+            if vim_input.strip() == ":q":
+                break
+            trigger_alert(session_id, "Vim Input", f"Input: {vim_input}", client_ip, username)
+        chan.send(b"\r\n")
+        return "", new_dir, jobs, cmd_count
+    elif cmd_name == "nano":
+        chan.send(b"Entering nano mode... Press Ctrl+D to exit\r\n")
+        while True:
+            nano_input, jobs, _ = read_line_advanced(chan, "", history=command_history, current_dir=current_dir, username=username, fs=fs, session_log=session_log, session_id=session_id, client_ip=client_ip, jobs=jobs, cmd_count=cmd_count)
+            if nano_input == "\x04":
+                break
+            trigger_alert(session_id, "Nano Input", f"Input: {nano_input}", client_ip, username)
+        chan.send(b"\r\n")
+        return "", new_dir, jobs, cmd_count
     elif cmd_name == "backup_data":
-        if "/tmp" in fs and fs["/tmp"]["type"] == "dir":
-            fs[os.path.join("/tmp", "backup.tar.gz")] = {"type": "file", "content": "Backup data placeholder", "owner": username, "permissions": "rw-r--r--", "mtime": datetime.now().strftime("%Y-%m-%d %H:%M:%S")}
-            if "backup.tar.gz" not in fs["/tmp"].get("contents", []):
-                fs["/tmp"]["contents"].append("backup.tar.gz")
-            save_filesystem(fs)
-            output = "backup_data: backup created in /tmp/backup.tar.gz"
-            trigger_alert(session_id, "Backup Created", "Created backup file in /tmp", client_ip, username)
-        else:
-            output = "backup_data: failed to create backup file"
-
-    elif cmd_name == "app_status":
-        output = f"app_status: Application {random.choice(['running','down','degraded'])} (simulated)"
-        trigger_alert(session_id, "App Status Check", f"Checked app status: {output}", client_ip, username)
-
-    elif cmd_name == "status_report":
-        output = f"status_report: System uptime {get_dynamic_uptime()} (simulated)"
-        trigger_alert(session_id, "Status Report", f"Generated status report", client_ip, username)
-
+        output = "Backing up data to /tmp/backup.tar.gz (simulated)..."
+        fs["/tmp/backup.tar.gz"] = {"type": "file", "content": "Simulated backup data", "owner": username, "permissions": "rw-r--r--", "mtime": datetime.now().strftime("%Y-%m-%d %H:%M:%S")}
+        if "/tmp" in fs and "contents" in fs["/tmp"] and "backup.tar.gz" not in fs["/tmp"]["contents"]:
+            fs["/tmp"]["contents"].append("backup.tar.gz")
+        save_filesystem(fs)
+        trigger_alert(session_id, "Backup Triggered", "Triggered backup", client_ip, username)
     elif cmd_name == "systemctl":
-        if not arg_str:
-            output = "systemctl: missing service name"
+        if "stop" in cmd_parts and "nginx" in cmd_parts:
+            output = "nginx service stopped (simulated)"
+            trigger_alert(session_id, "Service Stop", "Stopped nginx service", client_ip, username)
+        elif "start" in cmd_parts and "nginx" in cmd_parts:
+            output = "nginx service started (simulated)"
         else:
-            service = arg_str.split()[0]
-            if service in ["sshd", "nginx", "mysql"]:
-                action = arg_str.split()[1] if len(arg_str.split()) > 1 else "status"
-                output = f"systemctl: {action}ing {service} (simulated)"
-                trigger_alert(session_id, "Service Command", f"Executed systemctl {action} on {service}", client_ip, username)
-            else:
-                output = f"systemctl: no such service '{service}'"
-
-    elif cmd_name == "jobs":
-        output = "\n".join([f"[{i}] {job}" for i, job in enumerate(jobs, 1)]) if jobs else "No jobs running"
-
+            output = f"systemctl: unknown command or service '{arg_str}'"
+        trigger_alert(session_id, "Service Command", f"Executed systemctl: {cmd}", client_ip, username)
     elif cmd_name == "fg":
+        if arg_str and arg_str.isdigit() and int(arg_str) - 1 in range(len(jobs)):
+            job = jobs[int(arg_str) - 1]
+            output = f"Resuming job [{arg_str}]: {job['cmd']}\n"
+            output += job.get("output", "")
+            jobs.pop(int(arg_str) - 1)
+        else:
+            output = "fg: no such job"
+    elif cmd_name == "jobs":
         if jobs:
-            job = jobs.pop(0)
-            output = f"Foregrounding job: {job}"
+            output = "\n".join(f"[{job['id']}]: {job['cmd']} {job['state']}" for job in jobs)
         else:
-            output = "fg: no current job"
-
+            output = "No jobs running"
+    elif cmd_name == "app_status":
+        output = "Checking application status...\n\tWebServer: Running\n\tDatabase: Running\n\tBackup: Active"
+        trigger_alert(session_id, "App Status Check", "Checked application status", client_ip, username)
+    elif cmd_name == "status_report":
+        output = f"System Status for {username} at {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}:\nCurrent Directory: {current_dir}\nActive Jobs: {len(jobs)}\nSystem Uptime: {get_dynamic_uptime()}\nDisk Usage:\n{get_dynamic_df()}"
+        trigger_alert(session_id, "Status Report", "Generated system status report", client_ip, username)
     elif cmd_name == "whoami":
-        output = username
-        trigger_alert(session_id, "Command Executed", "Displayed user ID info", client_ip, username)
-
+        output = f"{username}"
+        trigger_alert(session_id, "Command Executed", "Displayed current user", client_ip, username)
     elif cmd_name == "id":
-        output = f"uid={PREDEFINED_USERS[username]['uid']}({username}) gid=1000 groups=1000"
+        user_info = PREDEFINED_USERS.get(username, {"uid": "1000", "groups": [username]})
+        output = f"uid={user_info['uid']}({username}) gid=1000({username}) groups={','.join(user_info['groups'])}"
         trigger_alert(session_id, "Command Executed", "Displayed user ID info", client_ip, username)
-
     elif cmd_name == "uname":
-        output = "Linux debian 5.15.0-73-generic #80-Ubuntu SMP Mon May 15 14:04:23 UTC 2023 x86_64"
+        output = f"Linux server 5.15.0-73-generic #80-Ubuntu SMP Mon May 15 10:15:39 UTC 2023 x86_64 GNU/Linux"
         trigger_alert(session_id, "Command Executed", "Displayed system info", client_ip, username)
-
     elif cmd_name == "pwd":
-        output = current_dir
+        output = f"{current_dir}"
         trigger_alert(session_id, "Command Executed", "Displayed current directory", client_ip, username)
-
-    elif cmd_name == "exit":
-        return "", new_dir, jobs, cmd_count, True
-
     elif cmd_name == "history":
-        output = "\n".join(f"{i+1}  {cmd}" for i, cmd in enumerate(command_history[-10:]))
-        trigger_alert(session_id, "Command Executed", "Displayed command history", client_ip, username)
-
-    elif cmd_name == "sudo" or cmd_name == "su":
-        if not arg_str:
-            output = f"{cmd_name}: missing username or command"
-        elif arg_str in PREDEFINED_USERS:
-            stored_hash = PREDEFINED_USERS[arg_str].get("password", "")
-            if hashlib.sha256(password.encode()).hexdigest() == stored_hash:
-                output = f"{cmd_name}: switched to {arg_str} (simulated)"
-                username = arg_str
-                trigger_alert(session_id, "Privilege Escalation", f"Switched to {arg_str}", client_ip, username)
-            else:
-                output = f"{cmd_name}: authentication failure"
-                trigger_alert(session_id, "Auth Failure", f"Failed {cmd_name} attempt for {arg_str}", client_ip, username)
-        else:
-            output = f"{cmd_name}: unknown user {arg_str}"
-            trigger_alert(session_id, "Auth Failure", f"Failed {cmd_name} attempt for {arg_str}", client_ip, username)
-
-    elif cmd_name == "df":
-        output = get_dynamic_df()
-        trigger_alert(session_id, "Command Executed", "Displayed disk usage", client_ip, username)
-
-    elif cmd_name == "uptime":
-        output = get_dynamic_uptime()
-        trigger_alert(session_id, "Command Executed", "Displayed system uptime", client_ip, username)
-
+        output = "\n".join(f"{i+1}  {cmd}" for i, cmd in enumerate(command_history))
+        trigger_alert(session_id, "Command History", "Displayed command history", client_ip, username)
+    elif cmd_name == "sudo":
+        output = f"sudo: {arg_str}: command not found"
+        trigger_alert(session_id, "Sudo Attempt", f"Attempted sudo command: {arg_str}", client_ip, username)
+    elif cmd_name == "su":
+        output = "su: Authentication failure"
+        trigger_alert(session_id, "SU Attempt", "Attempted su command", client_ip, username)
+    elif cmd_name == "exit":
+        output = "logout"
+        chan.send(b"logout\r\n")
+        chan.close()
+        trigger_alert(session_id, "Session Ended", "User logged out", client_ip, username)
+        return output, new_dir, jobs, cmd_count, True
     elif cmd_name == "ps":
         output = get_dynamic_ps()
         trigger_alert(session_id, "Command Executed", "Displayed process list", client_ip, username)
-
     elif cmd_name == "netstat":
         output = get_dynamic_netstat()
         trigger_alert(session_id, "Command Executed", "Displayed network connections", client_ip, username)
-
     elif cmd_name == "dmesg":
         output = get_dynamic_dmesg()
         trigger_alert(session_id, "Command Executed", "Displayed kernel messages", client_ip, username)
-
+    elif cmd_name == "df":
+        output = get_dynamic_df()
+        trigger_alert(session_id, "Command Executed", "Displayed disk usage", client_ip, username)
+    elif cmd_name == "uptime":
+        output = get_dynamic_uptime()
+        trigger_alert(session_id, "Command Executed", "Displayed system uptime", client_ip, username)
     else:
-        output = f"Command '{cmd_name}' not found or not implemented"
-
+        output = f"{cmd_name}: command not found"
+        trigger_alert(session_id, "Unknown Command", f"Attempted unknown command: {cmd}", client_ip, username)
     cmd_count += 1
     if cmd_count >= CMD_LIMIT_PER_SESSION:
-        output += "\nWarning: Command limit reached for this session. Please restart."
+        output += "\nSession command limit reached. Terminating session."
+        chan.send(b"Session command limit reached. Terminating session.\r\n")
+        chan.close()
+        trigger_alert(session_id, "Session Limit Reached", "Session terminated due to command limit", client_ip, username)
         return output, new_dir, jobs, cmd_count, True
+    return output, new_dir, jobs, cmd_count, False
 
-    try:
-        with sqlite3.connect(DB_NAME) as conn:
-            conn.execute(
-                "INSERT INTO commands (timestamp, ip, username, command, session_id) VALUES (?, ?, ?, ?, ?)",
-                (datetime.now().strftime("%Y-%m-%d %H:%M:%S"), client_ip, username or "unknown", cmd, session_id)
-            )
-    except sqlite3.Error as e:
-        logger.error(f"Command log error: {e}", extra={'client_ip': client_ip, 'session_id': session_id})
-
-    return output, new_dir, jobs, cmd_count
-
-def read_char(chan):
-    old_settings = termios.tcgetattr(sys.stdin)
-    try:
-        tty.setcbreak(sys.stdin.fileno())
-        r, _, _ = select.select([chan], [], [], 0.1)
-        if r:
-            return chan.recv(1).decode()
-    except (termios.error, socket.error) as e:
-        logger.error(f"Error reading char: {e}", extra={'client_ip': 'N/A', 'session_id': 'N/A'})
-        return None
-    finally:
-        termios.tcsetattr(sys.stdin, termios.TCSADRAIN, old_settings)
-    return None
-
-def read_line_advanced(chan, prompt, command_history, current_dir, username, fs, session_log, session_id, client_ip, jobs, cmd_count, transport):
-    chan.send(prompt)
-    buffer = ""
+# Lecture de ligne avancée
+def read_line_advanced(chan, prompt, history, current_dir, username, fs, session_log, session_id, client_ip, jobs, cmd_count):
+    chan.send(prompt.encode())
+    current_input = ""
+    history_index = len(history)
     cursor_pos = 0
-    history_pos = len(command_history)
     while True:
-        char = read_char(chan)
-        if not char:
+        if not chan.recv_ready():
+            time.sleep(0.1)
             continue
-        if char == "\r" or char == "\n":
-            chan.send(b"\r\n")
-            cmd = buffer.strip()
-            if cmd:
-                if cmd[0] == "\t":
-                    cmd = autocomplete(cmd[1:], current_dir, username, fs, chan, command_history)
-                else:
-                    command_history.append(cmd)
-                output, new_dir, jobs, cmd_count, exit_flag = process_command(cmd, current_dir, username or "unknown", fs, client_ip, session_id, session_log, command_history, chan, jobs, cmd_count, transport)
-                if exit_flag:
-                    return cmd, new_dir, jobs, cmd_count, True
-                chan.send((output + "\r\n" + prompt.decode()).encode())
-                current_dir = new_dir
-            return cmd, current_dir, jobs, cmd_count, False
-        elif char == "\t":
-            completions = get_completions(buffer, current_dir, username, fs, command_history)
-            if completions and len(completions) == 1:
-                new_cmd = completions[0]
-                buffer = new_cmd
-                cursor_pos = len(buffer)
-                chan.send(f"\r\033[K{prompt.decode()}{buffer}".encode())
-            elif completions:
+        data = chan.recv(1024)
+        if not data:
+            return "", jobs, cmd_count
+        for char in data.decode('utf-8', errors='ignore'):
+            if char == '\r' or char == '\n':
                 chan.send(b"\r\n")
-                for c in completions[:10]:
-                    chan.send(f"{c}\r\n".encode())
-                chan.send(f"\r{prompt.decode()}{buffer}".encode())
-        elif char == "\033":  # Séquence d'échappement (flèches)
-            next_char = read_char(chan)
-            if next_char == "[":
-                final_char = read_char(chan)
-                if final_char == "A":  # Flèche haut
-                    if history_pos > 0:
-                        history_pos -= 1
-                        buffer = command_history[history_pos] if history_pos < len(command_history) else ""
-                        cursor_pos = len(buffer)
-                        chan.send(f"\r\033[K{prompt.decode()}{buffer}".encode())
-                elif final_char == "B":  # Flèche bas
-                    if history_pos < len(command_history):
-                        history_pos += 1
-                        buffer = command_history[history_pos] if history_pos < len(command_history) else ""
-                        cursor_pos = len(buffer)
-                        chan.send(f"\r\033[K{prompt.decode()}{buffer}".encode())
-                elif final_char == "C":  # Flèche droite
-                    if cursor_pos < len(buffer):
-                        cursor_pos += 1
-                        chan.send(f"\r\033[K{prompt.decode()}{buffer[:cursor_pos]}\033[1C".encode())
-                elif final_char == "D":  # Flèche gauche
-                    if cursor_pos > 0:
+                if current_input.strip():
+                    history.append(current_input)
+                return current_input, jobs, cmd_count
+            elif char == '\t':
+                current_input = autocomplete(current_input, current_dir, username, fs, chan, history)
+                chan.send(b"\r" + b" " * 100 + b"\r" + prompt.encode() + current_input.encode())
+                cursor_pos = len(current_input)
+            elif char == '\x7f' or char == '\b':
+                if cursor_pos > 0:
+                    current_input = current_input[:cursor_pos-1] + current_input[cursor_pos:]
+                    cursor_pos -= 1
+                    chan.send(b"\b \b" + current_input[cursor_pos:].encode() + b" " + b"\b" * (len(current_input[cursor_pos:]) + 1))
+            elif char == '\x03':  # Ctrl+C
+                chan.send(b"^C\r\n")
+                current_input = ""
+                cursor_pos = 0
+                chan.send(prompt.encode())
+            elif ord(char) == 27:  # Escape sequence (arrows)
+                if chan.recv_ready():
+                    next_chars = chan.recv(2).decode('utf-8', errors='ignore')
+                    if next_chars == "[A" and history_index > 0:  # Up arrow
+                        history_index -= 1
+                        current_input = history[history_index] if history_index < len(history) else ""
+                        cursor_pos = len(current_input)
+                        chan.send(b"\r" + b" " * 100 + b"\r" + prompt.encode() + current_input.encode())
+                    elif next_chars == "[B" and history_index < len(history) - 1:  # Down arrow
+                        history_index += 1
+                        current_input = history[history_index] if history_index < len(history) else ""
+                        cursor_pos = len(current_input)
+                        chan.send(b"\r" + b" " * 100 + b"\r" + prompt.encode() + current_input.encode())
+                    elif next_chars == "[D" and cursor_pos > 0:  # Left arrow
                         cursor_pos -= 1
-                        chan.send(f"\r\033[K{prompt.decode()}{buffer[:cursor_pos]}\033[1D".encode())
-        elif char == "\x7f":  # Retour arrière
-            if cursor_pos > 0:
-                buffer = buffer[:cursor_pos-1] + buffer[cursor_pos:]
-                cursor_pos -= 1
-                chan.send(f"\r\033[K{prompt.decode()}{buffer}".encode())
-        else:
-            buffer = buffer[:cursor_pos] + char + buffer[cursor_pos:]
-            cursor_pos += 1
-            chan.send(f"\r\033[K{prompt.decode()}{buffer}".encode())
-        time.sleep(0.01)
+                        chan.send(b"\b")
+                    elif next_chars == "[C" and cursor_pos < len(current_input):  # Right arrow
+                        cursor_pos += 1
+                        chan.send(b"\033[C")
+            elif char in string.printable:
+                current_input = current_input[:cursor_pos] + char + current_input[cursor_pos:]
+                cursor_pos += 1
+                chan.send((char + current_input[cursor_pos:]).encode() + b"\b" * len(current_input[cursor_pos:]))
+            log_activity(session_id, client_ip, username, char)
 
+# Gestion des connexions
+def handle_connection(client, addr, server_key):
+    client_ip = addr[0]
+    session_id = uuid.uuid4().int
+    with _connection_lock:
+        _connection_count[client_ip] = _connection_count.get(client_ip, 0) + 1
+        if _connection_count[client_ip] > CONNECTION_LIMIT_PER_IP:
+            print(f"[!] Connection limit exceeded for {client_ip}")
+            client.close()
+            return
+
+    try:
+        transport = paramiko.Transport(client)
+        transport.add_server_key(server_key)
+        transport.set_subsystem_handler('sftp', paramiko.SFTPServer, HoneypotSFTPServer)
+        server = HoneypotSSHServer(client_ip, session_id)
+        transport.start_server(server=server)
+        chan = transport.accept(20)
+        if chan is None:
+            print(f"[!] No channel for {client_ip}")
+            transport.close()
+            return
+
+        username = server.username
+        if not username:
+            transport.close()
+            return
+
+        trigger_alert(session_id, "Connection Established", f"New session started", client_ip, username)
+        chan.send(f"Welcome to Ubuntu 20.04.3 LTS (GNU/Linux 5.15.0-73-generic x86_64)\r\n\r\n".encode())
+        current_dir = PREDEFINED_USERS.get(username, {"home": f"/home/{username}"}).get("home", "/home")
+        session_log = []
+        history =        history = load_history(username)
+        jobs = []
+        cmd_count = 0
+
+        while True:
+            input_line, jobs, cmd_count = read_line_advanced(chan, f"{username}@{client_ip}:{current_dir}$ ", history, current_dir, username, FS, session_log, session_id, client_ip, jobs, cmd_count)
+            if not input_line:  # Vérifie si la connexion est interrompue
+                break
+            output, current_dir, jobs, cmd_count, terminate = process_command(input_line, current_dir, username, FS, client_ip, session_id, session_log, history, chan, jobs, cmd_count)
+            if terminate:
+                break
+            if output:
+                chan.send((output + "\r\n").encode())
+
+        save_history(username, history)
+        with _connection_lock:
+            _connection_count[client_ip] -= 1
+        trigger_alert(session_id, "Session Terminated", "Session ended", client_ip, username)
+        transport.close()
+    except Exception as e:
+        print(f"[!] Error in handle_connection: {e}")
+        trigger_alert(session_id, "Connection Error", str(e), client_ip, username)
+    finally:
+        try:
+            client.close()
+        except:
+            pass  # Évite l'erreur "Bad file descriptor" si déjà fermé
+
+# Serveur SSH personnalisé
 class HoneypotSSHServer(paramiko.ServerInterface):
-    def __init__(self):
-        self.event = threading.Event()
-        self.login_attempts = {}  # Suivi des tentatives par IP et utilisateur
-        self.transport = None
-        self.session_id = None
-        self.client_ip = None
+    def __init__(self, client_ip, session_id):
+        self.client_ip = client_ip
+        self.session_id = session_id
         self.username = None
-        self.current_dir = "/"
         self.password = None
-
-    def set_transport(self, transport):
-        """Méthode pour définir le transport une fois disponible"""
-        self.transport = transport
-        if transport:
-            try:
-                self.client_ip = transport.getpeername()[0]
-            except AttributeError:
-                self.client_ip = "unknown"
+        self.event = threading.Event()
 
     def check_channel_request(self, kind, chanid):
         if kind == "session":
@@ -1060,219 +1221,129 @@ class HoneypotSSHServer(paramiko.ServerInterface):
         return paramiko.OPEN_FAILED_ADMINISTRATIVELY_PROHIBITED
 
     def check_auth_password(self, username, password):
-        if self.transport is None:
-            client_ip = "unknown"
-        else:
+        self.username = username
+        self.password = password
+        if not check_bruteforce(self.client_ip, username, password):
+            return paramiko.AUTH_FAILED
+        try:
+            with sqlite3.connect(DB_NAME) as conn:
+                conn.execute(
+                    "INSERT INTO login_attempts (timestamp, ip, username, password, success, redirected) VALUES (?, ?, ?, ?, ?, ?)",
+                    (datetime.now().strftime("%Y-%m-%d %H:%M:%S"), self.client_ip, username, password, 0, 0)
+                )
+        except sqlite3.Error as e:
+            print(f"[!] Login DB error: {e}")
+        if username in PREDEFINED_USERS and hashlib.sha256(password.encode()).hexdigest() == PREDEFINED_USERS[username]["password"]:
             try:
-                client_ip = self.transport.getpeername()[0]
-            except AttributeError:
-                client_ip = "unknown"
-        
-        key = (client_ip, username)
-        self.login_attempts[key] = self.login_attempts.get(key, 0) + 1
-        attempt_count = self.login_attempts[key]
-        self.password = password  # Stocker le mot de passe pour une utilisation ultérieure dans la session
+                with sqlite3.connect(DB_NAME) as conn:
+                    conn.execute(
+                        "UPDATE login_attempts SET success = 1 WHERE ip = ? AND username = ? AND timestamp = (SELECT MAX(timestamp) FROM login_attempts WHERE ip = ? AND username = ?)",
+                        (self.client_ip, username, self.client_ip, username)
+                    )
+            except sqlite3.Error as e:
+                print(f"[!] Login update error: {e}")
+            trigger_alert(self.session_id, "Successful Login", f"User {username} logged in", self.client_ip, username)
+            return paramiko.AUTH_SUCCESSFUL
+        trigger_alert(self.session_id, "Failed Login", f"Failed login attempt for {username}", self.client_ip, username)
+        return paramiko.AUTH_FAILED
 
-        if username in PREDEFINED_USERS:
-            stored_hash = PREDEFINED_USERS[username].get("password", "")
-            if hashlib.sha256(password.encode()).hexdigest() == stored_hash:
-                if check_bruteforce(client_ip, username, password):
-                    try:
-                        with sqlite3.connect(DB_NAME) as conn:
-                            conn.execute("INSERT INTO login_attempts (timestamp, ip, username, password, success, redirected) VALUES (?, ?, ?, ?, ?, ?)",
-                                        (datetime.now().strftime("%Y-%m-%d %H:%M:%S"), client_ip, username, password, 1, 0))
-                    except sqlite3.Error as e:
-                        logger.error(f"Login log error: {e}", extra={'client_ip': client_ip, 'session_id': self.session_id})
-                    trigger_alert(self.session_id, "Successful Login", f"User {username} logged in from {client_ip}", client_ip, username)
-                    self.login_attempts[key] = 0  # Réinitialiser après succès
-                    self.username = username
-                    return paramiko.AUTH_SUCCESSFUL
-                else:
-                    trigger_alert(self.session_id, "Auth Failure", f"Brute force detected for {username} from {client_ip}", client_ip, "unknown")
-                    return paramiko.AUTH_FAILED
-            else:
-                try:
-                    with sqlite3.connect(DB_NAME) as conn:
-                        conn.execute("INSERT INTO login_attempts (timestamp, ip, username, password, success, redirected) VALUES (?, ?, ?, ?, ?, ?)",
-                                    (datetime.now().strftime("%Y-%m-%d %H:%M:%S"), client_ip, username, password, 0, 0))
-                except sqlite3.Error as e:
-                    logger.error(f"Login log error: {e}", extra={'client_ip': client_ip, 'session_id': self.session_id})
-                trigger_alert(self.session_id, "Auth Failure", f"Failed login attempt for {username} from {client_ip}", client_ip, "unknown")
-                return paramiko.AUTH_FAILED
-        else:
-            if attempt_count >= 3:
-                trigger_alert(self.session_id, "Successful Login", f"User {username} allowed after {attempt_count} attempts from {client_ip}", client_ip, username)
-                self.login_attempts[key] = 0
-                self.username = username
-                return paramiko.AUTH_SUCCESSFUL
-            else:
-                trigger_alert(self.session_id, "Auth Failure", f"Attempt {attempt_count}/3 failed for {username} from {client_ip}", client_ip, "unknown")
-                return paramiko.AUTH_FAILED
+    def check_channel_exec_request(self, channel, command):
+        return False
 
     def get_allowed_auths(self, username):
         return "password"
+
+    def check_auth_publickey(self, username, key):
+        return paramiko.AUTH_FAILED
+
+    def check_auth_gssapi_with_mic(self, username, gss_server):
+        return paramiko.AUTH_FAILED
+
+    def enable_auth_gssapi(self):
+        return False
+
+    def check_channel_pty_request(self, channel, term, width, height, pixelwidth, pixelheight, modes):
+        return True
 
     def check_channel_shell_request(self, channel):
         self.event.set()
         return True
 
-    def check_channel_pty_request(self, channel, term, width, height, pixelwidth, pixelheight, modes):
-        return True
+    def check_channel_direct_tcpip_request(self, chanid, origin, destination):
+        detect_port_scan(self.client_ip, destination[1])
+        return paramiko.OPEN_FAILED_ADMINISTRATIVELY_PROHIBITED
 
+# Serveur SFTP personnalisé
 class HoneypotSFTPServer(paramiko.SFTPServerInterface):
     def __init__(self, server):
         self.server = server
         self.fs = FS
 
-    def _realpath(self, path):
-        if not path.startswith("/"):
-            path = os.path.normpath(os.path.join(self.server.current_dir, path))
-        return path
-
     def list_folder(self, path):
-        path = self._realpath(path)
-        if path in self.fs and self.fs[path]["type"] == "dir":
-            items = [{"filename": item, "longname": f"{self.fs[os.path.join(path, item)]['permissions']} 1 {self.fs[os.path.join(path, item)]['owner']} {self.fs[os.path.join(path, item)]['owner']} 0 {self.fs[os.path.join(path, item)]['mtime']} {item}", "attrs": paramiko.SFTPAttributes()} for item in self.fs[path]["contents"]]
-            trigger_alert(self.server.session_id, "SFTP List", f"Listed {path}", self.server.client_ip, self.server.username)
-            return items
-        raise IOError(2, "No such file or directory")
+        path = os.path.normpath(path if path.startswith("/") else f"/{path}")
+        if path not in self.fs or self.fs[path]["type"] != "dir" or "contents" not in self.fs[path]:
+            return paramiko.SFTP_NO_SUCH_FILE
+        return [(f, {}, {}) for f in self.fs[path]["contents"]]
 
     def stat(self, path):
-        path = self._realpath(path)
-        if path in self.fs:
-            attrs = paramiko.SFTPAttributes()
-            attrs.st_mode = (0o777 if "w" in self.fs[path]["permissions"] else 0o555) if self.fs[path]["type"] == "dir" else (0o666 if "w" in self.fs[path]["permissions"] else 0o444)
-            attrs.st_size = len(str(self.fs[path].get("content", ""))) if self.fs[path].get("content") and not callable(self.fs[path].get("content")) else 0
-            attrs.st_mtime = time.mktime(datetime.strptime(self.fs[path]["mtime"], "%Y-%m-%d %H:%M:%S").timetuple())
-            trigger_alert(self.server.session_id, "SFTP Stat", f"Stat on {path}", self.server.client_ip, self.server.username)
-            return attrs
-        raise IOError(2, "No such file or directory")
+        path = os.path.normpath(path if path.startswith("/") else f"/{path}")
+        if path not in self.fs:
+            return paramiko.SFTP_NO_SUCH_FILE
+        attrs = paramiko.SFTPAttributes()
+        attrs.st_size = len(self.fs[path].get("content", "")) if self.fs[path]["type"] == "file" and not callable(self.fs[path].get("content")) else 0
+        attrs.st_uid = PREDEFINED_USERS.get(self.server.username, {"uid": 1000})["uid"]
+        attrs.st_gid = 1000
+        attrs.st_mode = (0o100755 if self.fs[path]["type"] == "dir" else 0o100644) | (0o0400 if "r" in self.fs[path].get("permissions", "rw-r--r--") else 0) | (0o0200 if "w" in self.fs[path].get("permissions", "") else 0) | (0o0100 if "x" in self.fs[path].get("permissions", "") else 0)
+        attrs.st_atime = attrs.st_mtime = time.mktime(datetime.strptime(self.fs[path].get("mtime", datetime.now().strftime("%Y-%m-%d %H:%M:%S")), "%Y-%m-%d %H:%M:%S").timetuple())
+        return attrs
 
     def open(self, path, flags, attr):
-        path = self._realpath(path)
-        if path in self.fs and self.fs[path]["type"] == "file":
-            if "w" in self.fs[path]["permissions"] or self.server.username in ["admin", "root"]:
-                trigger_alert(self.server.session_id, "SFTP Open", f"Opened {path} for writing", self.server.client_ip, self.server.username)
-                return StringIO(str(self.fs[path].get("content", "")))
-            raise IOError(13, "Permission denied")
-        raise IOError(2, "No such file or directory")
+        path = os.path.normpath(path if path.startswith("/") else f"/{path}")
+        if path not in self.fs or self.fs[path]["type"] != "file":
+            return paramiko.SFTP_NO_SUCH_FILE
+        trigger_alert(self.server.session_id, "SFTP Access", f"Accessed file via SFTP: {path}", self.server.client_ip, self.server.username)
+        return StringIO(self.fs[path]["content"]() if callable(self.fs[path]["content"]) else self.fs[path]["content"])
 
     def remove(self, path):
-        path = self._realpath(path)
-        if path in self.fs:
-            if "w" in self.fs[path]["permissions"] or self.server.username in ["admin", "root"]:
-                parent_dir = "/".join(path.split("/")[:-1]) or "/"
-                if parent_dir in self.fs and path.split("/")[-1] in self.fs[parent_dir]["contents"]:
-                    self.fs[parent_dir]["contents"].remove(path.split("/")[-1])
-                del self.fs[path]
-                save_filesystem(self.fs)
-                trigger_alert(self.server.session_id, "SFTP Delete", f"Deleted {path}", self.server.client_ip, self.server.username)
-                return
-        raise IOError(2, "No such file or directory")
+        path = os.path.normpath(path if path.startswith("/") else f"/{path}")
+        if path in self.fs and self.fs[path]["type"] == "file":
+            parent_dir = "/".join(path.split("/")[:-1]) or "/"
+            if parent_dir in self.fs and "contents" in self.fs[parent_dir] and path.split("/")[-1] in self.fs[parent_dir]["contents"]:
+                self.fs[parent_dir]["contents"].remove(path.split("/")[-1])
+            del self.fs[path]
+            save_filesystem(self.fs)
+            trigger_alert(self.server.session_id, "SFTP Delete", f"Deleted file via SFTP: {path}", self.server.client_ip, self.server.username)
+            return paramiko.SFTP_OK
+        return paramiko.SFTP_NO_SUCH_FILE
 
-def handle_client(client_socket, client_ip, is_sftp=False):
-    session_id = uuid.uuid4().int & 0xFFFFFFFF
-    logger.info(f"New {'SFTP' if is_sftp else 'SSH'} connection from {client_ip}", extra={'client_ip': client_ip, 'session_id': session_id})
-    trigger_alert(session_id, "New Connection", f"New {'SFTP' if is_sftp else 'SSH'} client connection from {client_ip}", client_ip, "unknown")
+# Lancement du serveur
+def signal_handler(signum, frame):
+    print("[!] Shutting down server...")
+    sys.exit(0)
 
-    try:
-        with sqlite3.connect(DB_NAME) as conn:
-            conn.execute("INSERT INTO login_attempts (timestamp, ip, username, password, success, redirected) VALUES (?, ?, ?, ?, ?, ?)",
-                        (datetime.now().strftime("%Y-%m-%d %H:%M:%S"), client_ip, "unknown", "", 0, 0))
-
-        transport = paramiko.Transport(client_socket)
-        server = HoneypotSSHServer()
-        server.set_transport(transport)
-        server.session_id = session_id
-        server.client_ip = client_ip
-        if is_sftp:
-            transport.add_server_key(paramiko.RSAKey.from_private_key_file("key.pem"))
-            transport.set_subsystem_handler("sftp", paramiko.SFTPServer, HoneypotSFTPServer, server)
-        else:
-            transport.add_server_key(paramiko.RSAKey.from_private_key_file("key.pem"))
-            transport.start_server(server=server)
-
-        chan = transport.accept(20)
-        if chan is None:
-            logger.warning("No channel accepted", extra={'client_ip': client_ip, 'session_id': session_id})
-            return
-
-        username = server.username
-        password = server.password
-        current_dir = PREDEFINED_USERS.get(username, {}).get("home", "/") if username else "/"
-        session_log = []
-        command_history = []
-        jobs = []
-        cmd_count = 0
-
-        while True:
-            prompt = generate_prompt(username or "guest", current_dir).encode()
-            cmd, current_dir, jobs, cmd_count, exit_flag = read_line_advanced(chan, prompt, command_history, current_dir, username, FS, session_log, session_id, client_ip, jobs, cmd_count, transport)
-            if exit_flag:
-                break
-        else:  # SFTP handling
-            transport.accept(20)  # Keep SFTP connection alive
-            # SFTP operations are handled by HoneypotSFTPServer
-    except Exception as e:
-        logger.error(f"Error in handle_client: {e}", extra={'client_ip': client_ip, 'session_id': session_id})
-    finally:
-        with _connection_lock:
-            if client_ip in _connection_count:
-                _connection_count[client_ip] -= 1
-        if chan:
-            chan.close()
-        if transport:
-            transport.close()
-        client_socket.close()
-        logger.info(f"{'SFTP' if is_sftp else 'SSH'} session ended for {client_ip}", extra={'client_ip': client_ip, 'session_id': session_id})
-
-def start_server():
-    global FS
-    init_database()
-    init_filesystem_db()
-    FS = load_filesystem() or BASE_FILE_SYSTEM
-    FS = populate_predefined_users(FS)
-    add_vulnerabilities(FS)
-    save_filesystem(FS)
-
-    ssh_server = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-    ssh_server.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-    ssh_server.bind((HOST, PORT))
-    ssh_server.listen(5)
-    logger.info(f"SSH Honeypot listening on {HOST}:{PORT}", extra={'client_ip': 'N/A', 'session_id': 'N/A'})
-
-    sftp_server = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-    sftp_server.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-    sftp_server.bind((HOST, SFTP_PORT))
-    sftp_server.listen(5)
-    logger.info(f"SFTP Honeypot listening on {HOST}:{SFTP_PORT}", extra={'client_ip': 'N/A', 'session_id': 'N/A'})
-
-    # Start background threads
-    threading.Thread(target=cleanup_bruteforce_attempts, daemon=True).start()
-    threading.Thread(target=cleanup_trap_files, daemon=True).start()
-    threading.Thread(target=schedule_reports, daemon=True).start()
-
-    # Accept connections
-    while True:
-        client_socket, addr = ssh_server.accept()
-        client_ip = addr[0]
-        with _connection_lock:
-            _connection_count[client_ip] = _connection_count.get(client_ip, 0) + 1
-            if _connection_count[client_ip] > CONNECTION_LIMIT_PER_IP:
-                client_socket.close()
-                trigger_alert(None, "Connection Limit Exceeded", f"IP {client_ip} exceeded connection limit", client_ip, "unknown")
-                continue
-        threading.Thread(target=handle_client, args=(client_socket, client_ip, False), daemon=True).start()
-
-        client_socket, addr = sftp_server.accept()
-        client_ip = addr[0]
-        with _connection_lock:
-            _connection_count[client_ip] = _connection_count.get(client_ip, 0) + 1
-            if _connection_count[client_ip] > CONNECTION_LIMIT_PER_IP:
-                client_socket.close()
-                trigger_alert(None, "Connection Limit Exceeded", f"IP {client_ip} exceeded connection limit", client_ip, "unknown")
-                continue
-        threading.Thread(target=handle_client, args=(client_socket, client_ip, True), daemon=True).start()
+signal.signal(signal.SIGINT, signal_handler)
+signal.signal(signal.SIGTERM, signal_handler)
 
 if __name__ == "__main__":
-    start_server()
+    init_database()
+    server_key = paramiko.RSAKey.generate(2048)
+    server = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    server.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+    server.bind((HOST, PORT))
+    server.listen(100)
+    print(f"[*] SSH Honeypot listening on {HOST}:{PORT}")
+
+    threading.Thread(target=cleanup_bruteforce_attempts, daemon=True).start()
+    threading.Thread(target=send_weekly_report, daemon=True).start()
+    threading.Thread(target=send_periodic_report, daemon=True).start()
+    threading.Thread(target=cleanup_trap_files, args=(FS,), daemon=True).start()
+
+    while True:
+        try:
+            client, addr = server.accept()
+            threading.Thread(target=handle_connection, args=(client, addr, server_key), daemon=True).start()
+        except KeyboardInterrupt:
+            break
+        except Exception as e:
+            print(f"[!] Server error: {e}")
+    server.close()
