@@ -38,8 +38,12 @@ ENABLE_REDIRECTION = False
 REAL_SSH_HOST = "192.168.1.100"
 REAL_SSH_PORT = 22
 
-DB_NAME = ":memory:"  # Base en mémoire
-FS_DB = ":memory:"    # Base en mémoire pour le système de fichiers
+DB_NAME = "file:honey?mode=memory&cache=shared"  # Base en mémoire partagée
+DB_CONN = sqlite3.connect(DB_NAME, uri=True, check_same_thread=False)
+FS_DB = "file:filesystem?mode=memory&cache=shared"  # FS en mémoire partagée
+FS_CONN = sqlite3.connect(FS_DB, uri=True, check_same_thread=False)
+DB_LOCK = threading.Lock()
+FS_LOCK = threading.Lock()
 BRUTE_FORCE_THRESHOLD = 5
 BRUTE_FORCE_WINDOW = 300  # 5 minutes
 CMD_LIMIT_PER_SESSION = 50
@@ -333,8 +337,8 @@ def get_dev_zero(): return "\0" * 1024
 # Gestion du système de fichiers
 def init_filesystem_db():
     try:
-        with sqlite3.connect(FS_DB) as conn:
-            conn.execute("""
+        FS_CONN.execute(
+            """
                 CREATE TABLE IF NOT EXISTS filesystem (
                     path TEXT PRIMARY KEY,
                     type TEXT NOT NULL,
@@ -343,8 +347,10 @@ def init_filesystem_db():
                     permissions TEXT,
                     mtime TEXT
                 )
-            """)
-            print("[*] Filesystem database initialized successfully")
+            """
+        )
+        FS_CONN.commit()
+        print("[*] Filesystem database initialized successfully")
     except sqlite3.Error as e:
         print(f"[!] Filesystem DB init error: {e}")
         raise
@@ -352,9 +358,9 @@ def init_filesystem_db():
 def load_filesystem():
     fs = {}
     try:
-        with sqlite3.connect(FS_DB) as conn:
-            conn.row_factory = sqlite3.Row
-            cur = conn.cursor()
+        with FS_LOCK:
+            FS_CONN.row_factory = sqlite3.Row
+            cur = FS_CONN.cursor()
             cur.execute("SELECT path, type, content, owner, permissions, mtime FROM filesystem")
             for row in cur.fetchall():
                 path = row["path"]
@@ -377,13 +383,14 @@ def load_filesystem():
 
 def save_filesystem(fs):
     try:
-        with sqlite3.connect(FS_DB) as conn:
-            conn.execute("DELETE FROM filesystem")  # Efface et réinsère pour simplicité
+        with FS_LOCK:
+            FS_CONN.execute("DELETE FROM filesystem")  # Efface et réinsère pour simplicité
             for path, data in fs.items():
-                conn.execute(
+                FS_CONN.execute(
                     "INSERT INTO filesystem (path, type, content, owner, permissions, mtime) VALUES (?, ?, ?, ?, ?, ?)",
                     (path, data["type"], data.get("content", "") if not callable(data.get("content")) else "", data.get("owner", "root"), data.get("permissions", "rw-r--r--"), data.get("mtime", datetime.now().strftime("%Y-%m-%d %H:%M:%S")))
                 )
+            FS_CONN.commit()
     except sqlite3.Error as e:
         print(f"[!] Filesystem save error: {e}")
 
@@ -554,7 +561,7 @@ def trigger_alert(session_id, event_type, details, client_ip, username):
     except smtplib.SMTPException as e:
         print(f"[!] SMTP error: {str(e)}")
     try:
-        with sqlite3.connect(DB_NAME) as conn:
+        with sqlite3.connect(DB_NAME, uri=True) as conn:
             conn.execute(
                 "INSERT INTO events (timestamp, ip, username, event_type, details) VALUES (?, ?, ?, ?, ?)",
                 (timestamp, client_ip, username, event_type, details)
@@ -618,7 +625,7 @@ def cleanup_bruteforce_attempts():
 # Détection des scans de ports
 def detect_port_scan(ip, port):
     try:
-        with sqlite3.connect(DB_NAME) as conn:
+        with sqlite3.connect(DB_NAME, uri=True) as conn:
             cur = conn.cursor()
             cur.execute(
                 "SELECT COUNT(*) FROM events WHERE ip = ? AND event_type LIKE '%Connection' AND timestamp > ?",
@@ -640,8 +647,8 @@ def save_history(username, history):
 # Initialisation de la base de données
 def init_database():
     try:
-        with sqlite3.connect(DB_NAME) as conn:
-            conn.executescript("""
+        DB_CONN.executescript(
+            """
                 CREATE TABLE IF NOT EXISTS login_attempts (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
                     timestamp TEXT,
@@ -667,8 +674,10 @@ def init_database():
                     event_type TEXT NOT NULL,
                     details TEXT NOT NULL
                 )
-            """)
-            print("[*] Database initialized successfully")
+            """
+        )
+        DB_CONN.commit()
+        print("[*] Database initialized successfully")
     except sqlite3.Error as e:
         print(f"[!] DB init error: {e}")
         raise
@@ -683,7 +692,7 @@ def generate_report(period):
     start_time = (datetime.now() - timedelta(minutes=15 if period == "15min" else 60 if period == "hourly" else 10080)).strftime("%Y-%m-%d %H:%M:%S")
     pdf.cell(0, 10, f"Period: {start_time} to {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}", 0, 1)
     try:
-        with sqlite3.connect(DB_NAME) as conn:
+        with sqlite3.connect(DB_NAME, uri=True) as conn:
             cur = conn.cursor()
             cur.execute("SELECT COUNT(*) FROM login_attempts WHERE timestamp > ?", (start_time,))
             login_count = cur.fetchone()[0]
@@ -1393,7 +1402,7 @@ class HoneypotSSHServer(paramiko.ServerInterface):
         if not check_bruteforce(self.client_ip, username, password):
             return paramiko.AUTH_FAILED
         try:
-            with sqlite3.connect(DB_NAME) as conn:
+            with sqlite3.connect(DB_NAME, uri=True) as conn:
                 conn.execute(
                     "INSERT INTO login_attempts (timestamp, ip, username, password, success, redirected) VALUES (?, ?, ?, ?, ?, ?)",
                     (datetime.now().strftime("%Y-%m-%d %H:%M:%S"), self.client_ip, username, password, 0, 0)
@@ -1402,7 +1411,7 @@ class HoneypotSSHServer(paramiko.ServerInterface):
             print(f"[!] Login DB error: {e}")
         if username in PREDEFINED_USERS and hashlib.sha256(password.encode()).hexdigest() == PREDEFINED_USERS[username]["password"]:
             try:
-                with sqlite3.connect(DB_NAME) as conn:
+                with sqlite3.connect(DB_NAME, uri=True) as conn:
                     conn.execute(
                         "UPDATE login_attempts SET success = 1 WHERE ip = ? AND username = ? AND timestamp = (SELECT MAX(timestamp) FROM login_attempts WHERE ip = ? AND username = ?)",
                         (self.client_ip, username, self.client_ip, username)
