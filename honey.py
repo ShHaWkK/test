@@ -146,7 +146,7 @@ COMMAND_OPTIONS = {
     "apt-get": ["update", "upgrade", "install", "remove"], "scp": ["-r", "-P"], "curl": ["-O", "-L", "--help"],
     "wget": ["-O", "-q", "--help"], "telnet": [], "ping": ["-c", "-i"], "nmap": ["-sS", "-sV"], "who": [],
     "w": [], "top": [], "df": ["-h"], "uptime": [], "ps": ["-aux"], "netstat": ["-tuln"], "dmesg": [],
-    "app_status": [], "status_report": [], "backup_data": []
+    "tree": [], "app_status": [], "status_report": [], "backup_data": []
 }
 
 # Dynamic data generators
@@ -172,6 +172,28 @@ def get_dynamic_who(): return "\n".join([f"{user:<10} {random.choice(['pts/0','p
 def get_dynamic_w(): return " 03:07 AM CEST, Sat Jun 14, 2025 up 7 days,  3:45,  2 users,  load average: 0.10, 0.20, 0.30\nUSER     TTY      FROM             LOGIN@   IDLE   JCPU   PCPU WHAT\n" + "\n".join(get_dynamic_who().split("\n")[1:3])
 def get_dev_null(): return ""
 def get_dev_zero(): return "\0" * 1024
+
+def generate_tree_output(start_path, fs, prefix=""):
+    output = ""
+    if start_path not in fs or fs[start_path]["type"] != "dir":
+        return f"tree: {start_path}: Not a directory"
+    contents = fs[start_path]["contents"]
+    for index, item in enumerate(contents):
+        connector = "├── " if index < len(contents) - 1 else "└── "
+        child_path = os.path.join(start_path, item)
+        output += f"{prefix}{connector}{item}\n"
+        if child_path in fs and fs[child_path]["type"] == "dir":
+            extension = "│   " if index < len(contents) - 1 else "    "
+            output += generate_tree_output(child_path, fs, prefix + extension)
+    return output
+
+def generate_prompt(username, current_dir):
+    host = socket.gethostname().split('.')[0]
+    now = datetime.now().strftime("%H:%M:%S")
+    user_col = "\033[1;32m" if username == "root" else "\033[1;34m"
+    path_col = "\033[1;36m"
+    reset = "\033[0m"
+    return f"{user_col}{username}@{host}{reset}:{path_col}{current_dir}{reset} {now}$ "
 
 def init_filesystem_db():
     try:
@@ -298,6 +320,17 @@ BASE_FILE_SYSTEM = {
     "/dev": {"type": "dir", "contents": ["null", "zero"], "owner": "root", "permissions": "rwxr-xr-x", "mtime": datetime.now().strftime("%Y-%m-%d %H:%M:%S")},
     "/dev/null": {"type": "file", "content": get_dev_null, "owner": "root", "permissions": "rwxrwxrwx", "mtime": datetime.now().strftime("%Y-%m-%d %H:%M:%S")},
     "/dev/zero": {"type": "file", "content": get_dev_zero, "owner": "root", "permissions": "rwxrwxrwx", "mtime": datetime.now().strftime("%Y-%m-%d %H:%M:%S")},
+    "/usr": {"type": "dir", "contents": ["bin", "lib", "share"], "owner": "root", "permissions": "rwxr-xr-x", "mtime": datetime.now().strftime("%Y-%m-%d %H:%M:%S")},
+    "/usr/bin": {"type": "dir", "contents": ["python3", "vim", "nano"], "owner": "root", "permissions": "rwxr-xr-x", "mtime": datetime.now().strftime("%Y-%m-%d %H:%M:%S")},
+    "/usr/bin/python3": {"type": "file", "content": "ELF binary", "owner": "root", "permissions": "rwxr-xr-x", "mtime": datetime.now().strftime("%Y-%m-%d %H:%M:%S")},
+    "/usr/bin/vim": {"type": "file", "content": "ELF binary", "owner": "root", "permissions": "rwxr-xr-x", "mtime": datetime.now().strftime("%Y-%m-%d %H:%M:%S")},
+    "/usr/bin/nano": {"type": "file", "content": "ELF binary", "owner": "root", "permissions": "rwxr-xr-x", "mtime": datetime.now().strftime("%Y-%m-%d %H:%M:%S")},
+    "/etc": {"type": "dir", "contents": ["passwd", "ssh"], "owner": "root", "permissions": "rwxr-xr-x", "mtime": datetime.now().strftime("%Y-%m-%d %H:%M:%S")},
+    "/etc/passwd": {"type": "file", "content": "root:x:0:0:root:/root:/bin/bash", "owner": "root", "permissions": "rw-r--r--", "mtime": datetime.now().strftime("%Y-%m-%d %H:%M:%S")},
+    "/etc/ssh": {"type": "dir", "contents": ["sshd_config"], "owner": "root", "permissions": "rwxr-xr-x", "mtime": datetime.now().strftime("%Y-%m-%d %H:%M:%S")},
+    "/etc/ssh/sshd_config": {"type": "file", "content": "# SSH daemon configuration", "owner": "root", "permissions": "rw-r--r--", "mtime": datetime.now().strftime("%Y-%m-%d %H:%M:%S")},
+    "/root": {"type": "dir", "contents": [".bashrc"], "owner": "root", "permissions": "rwx------", "mtime": datetime.now().strftime("%Y-%m-%d %H:%M:%S")},
+    "/root/.bashrc": {"type": "file", "content": "alias ll='ls -la'", "owner": "root", "permissions": "rw-r--r--", "mtime": datetime.now().strftime("%Y-%m-%d %H:%M:%S")},
     "/home": {"type": "dir", "contents": ["admin", "devops", "dbadmin"], "owner": "root", "permissions": "rwxr-xr-x", "mtime": datetime.now().strftime("%Y-%m-%d %H:%M:%S")},
 }
 
@@ -776,6 +809,16 @@ def process_command(cmd, current_dir, username, fs, client_ip, session_id, sessi
         output = "grep: simulated search (results not implemented)"
         trigger_alert(session_id, "Search Executed", f"Executed grep {arg_str}", client_ip, username)
 
+    elif cmd_name == "tree":
+        target_dir = arg_str.strip() or current_dir
+        if not target_dir.startswith("/"):
+            target_dir = os.path.normpath(os.path.join(current_dir, target_dir))
+        if target_dir in fs and fs[target_dir]["type"] == "dir":
+            output = os.path.basename(target_dir) + "\n" + generate_tree_output(target_dir, fs)
+            trigger_alert(session_id, "Command Executed", f"Displayed tree for {target_dir}", client_ip, username)
+        else:
+            output = f"tree: {target_dir}: No such directory"
+
     elif cmd_name == "service":
         if not arg_str:
             output = "service: missing service name"
@@ -1162,10 +1205,8 @@ def handle_client(client_socket, client_ip, is_sftp=False):
         jobs = []
         cmd_count = 0
 
-        # Prompt dynamique avec date/heure actuelles
-        prompt = f"{username}@{socket.gethostname().split('.')[0]}:{current_dir} 11:43 PM CEST, Sat Jun 14, 2025$ ".encode() if username else b"guest@honeypot:/ 11:43 PM CEST, Sat Jun 14, 2025$ "
-
         while True:
+            prompt = generate_prompt(username or "guest", current_dir).encode()
             cmd, current_dir, jobs, cmd_count, exit_flag = read_line_advanced(chan, prompt, command_history, current_dir, username, FS, session_log, session_id, client_ip, jobs, cmd_count, transport)
             if exit_flag:
                 break
