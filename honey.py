@@ -58,6 +58,9 @@ SESSION_LOG_DIR = "session_logs"
 LOG_DIR = "logs"
 LOG_FILE = os.path.join(LOG_DIR, "honey.log")
 
+# Console key logging level: 'full', 'filtered', or 'off'
+KEY_DISPLAY_MODE = 'filtered'
+
 USER_DEFINED_COMMANDS = set()
 
 class JsonFormatter(logging.Formatter):
@@ -582,7 +585,11 @@ def log_activity(session_id, client_ip, username, key):
         "key": key,
     }
     LOGGER.info(json.dumps(log_entry))
-    print(f"[ACTIVITY] {timestamp},{session_id},{client_ip},{username},{key}")
+    if KEY_DISPLAY_MODE == 'full':
+        print(f"[ACTIVITY] {timestamp},{session_id},{client_ip},{username},{key}")
+    elif KEY_DISPLAY_MODE == 'filtered':
+        if key in ['\n', '\r', '\t'] or key in string.ascii_letters[:3]:
+            print(f"[{username}@{client_ip}] {repr(key)}")
 
 def log_session_activity(session_id, client_ip, username, command_line, output):
     timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
