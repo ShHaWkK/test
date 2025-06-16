@@ -1225,6 +1225,20 @@ def process_command(cmd, current_dir, username, fs, client_ip, session_id, sessi
     return output, new_dir, jobs, cmd_count, False
 
 # Lecture interactive des lignes avec autocomplétion
+def _read_escape_sequence(chan):
+    seq = ""
+    # Read remaining bytes of an ANSI escape sequence without blocking
+    while True:
+        readable, _, _ = select.select([chan], [], [], 0.005)
+        if not readable:
+            break
+        try:
+            seq += chan.recv(1).decode("utf-8", errors="ignore")
+        except Exception:
+            break
+    return seq
+
+
 def read_line_advanced(chan, prompt, history, current_dir, username, fs, session_log, session_id, client_ip, jobs, cmd_count):
     chan.send(prompt.encode())
     buffer = ""
@@ -1238,14 +1252,15 @@ def read_line_advanced(chan, prompt, history, current_dir, username, fs, session
                 if not data:
                     return "", jobs, cmd_count
                 if data == '\x1b':
-                    seq = ''
-                    readable, _, _ = select.select([chan], [], [], 0.01)
-                    if readable:
-                        seq += chan.recv(1).decode('utf-8', errors='ignore')
+                    seq = data
+                    # Lire jusqu'à 2 caractères supplémentaires pour compléter la séquence ANSI
+                    for _ in range(2):
                         readable, _, _ = select.select([chan], [], [], 0.01)
                         if readable:
                             seq += chan.recv(1).decode('utf-8', errors='ignore')
-                    data += seq
+                        else:
+                            break
+                    data = seq
                 log_activity(session_id, client_ip, username, data)
                 
                 if data == '\r' or data == '\n':
@@ -1268,22 +1283,28 @@ def read_line_advanced(chan, prompt, history, current_dir, username, fs, session
                 elif data == '\x04':  # Ctrl+D
                     chan.send(b"logout\r\n")
                     return "exit", jobs, cmd_count
-                elif data in ['\x1b[A', '\x1b[B', '\x1bOA', '\x1bOB']:  # Up/Down arrow
-                    if data == '\x1b[A' and history_index > 0:
-                        history_index -= 1
-                    elif data == '\x1b[B' and history_index < len(history):
-                        history_index += 1
-                    buffer = history[history_index] if 0 <= history_index < len(history) else ""
-                    chan.send(b"\r" + b" " * 100 + b"\r" + prompt.encode() + buffer.encode())
-                    pos = len(buffer)
-                elif data in ['\x1b[D', '\x1b[C', '\x1bOD', '\x1bOC']:  # Left/Right arrow
-                    if data == '\x1b[D' and pos > 0:
-                        pos -= 1
-                        chan.send(b"\x1b[D")
-                    elif data == '\x1b[C' and pos < len(buffer):
-                        pos += 1
-                        chan.send(b"\x1b[C")
-                elif len(data) == 1 and ord(data) >= 32:
+                elif data in ['\x1b[A', '\x1b[B', '\x1b[C', '\x1b[D']:  # Flèches directionnelles
+                    if data == '\x1b[A':  # Flèche haut
+                        if history_index > 0:
+                            history_index -= 1
+                            buffer = history[history_index] if 0 <= history_index < len(history) else ""
+                            chan.send(b"\r" + b" " * 100 + b"\r" + prompt.encode() + buffer.encode())
+                            pos = len(buffer)
+                    elif data == '\x1b[B':  # Flèche bas
+                        if history_index < len(history):
+                            history_index += 1
+                            buffer = history[history_index] if 0 <= history_index < len(history) else ""
+                            chan.send(b"\r" + b" " * 100 + b"\r" + prompt.encode() + buffer.encode())
+                            pos = len(buffer)
+                    elif data == '\x1b[C':  # Flèche droite
+                        if pos < len(buffer):
+                            pos += 1
+                            chan.send(b"\x1b[C")
+                    elif data == '\x1b[D':  # Flèche gauche
+                        if pos > 0:
+                            pos -= 1
+                            chan.send(b"\x1b[D")
+                elif len(data) == 1 and ord(data) >= 32:  # Caractères imprimables
                     buffer = buffer[:pos] + data + buffer[pos:]
                     pos += 1
                     chan.send(data.encode())
@@ -1291,7 +1312,7 @@ def read_line_advanced(chan, prompt, history, current_dir, username, fs, session
                 continue
             except socket.timeout:
                 continue
-            except Exception as e:
+            except Exception as e equivale a "except Exception as e:" en Python
                 print(f"[!] Read line error: {e}")
                 return "", jobs, cmd_count
 
