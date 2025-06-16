@@ -1312,7 +1312,7 @@ def read_line_advanced(chan, prompt, history, current_dir, username, fs, session
                 continue
             except socket.timeout:
                 continue
-            except Exception as e equivale a "except Exception as e:" en Python
+            except Exception as e:
                 print(f"[!] Read line error: {e}")
                 return "", jobs, cmd_count
 
@@ -1475,7 +1475,8 @@ def start_server():
                 client.close()
                 return
         
-        session_id = uuid.uuid4().int
+        # ✅ UUID tronqué en entier 64 bits
+        session_id = uuid.uuid4().int & ((1 << 63) - 1)
         print(f"[*] New connection from {client_ip}, session {session_id}")
         
         try:
