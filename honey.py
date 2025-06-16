@@ -1237,6 +1237,15 @@ def read_line_advanced(chan, prompt, history, current_dir, username, fs, session
                 data = chan.recv(1).decode('utf-8', errors='ignore')
                 if not data:
                     return "", jobs, cmd_count
+                if data == '\x1b':
+                    seq = ''
+                    readable, _, _ = select.select([chan], [], [], 0.01)
+                    if readable:
+                        seq += chan.recv(1).decode('utf-8', errors='ignore')
+                        readable, _, _ = select.select([chan], [], [], 0.01)
+                        if readable:
+                            seq += chan.recv(1).decode('utf-8', errors='ignore')
+                    data += seq
                 log_activity(session_id, client_ip, username, data)
                 
                 if data == '\r' or data == '\n':
@@ -1259,7 +1268,7 @@ def read_line_advanced(chan, prompt, history, current_dir, username, fs, session
                 elif data == '\x04':  # Ctrl+D
                     chan.send(b"logout\r\n")
                     return "exit", jobs, cmd_count
-                elif data in ['\x1b[A', '\x1b[B']:  # Up/Down arrow
+                elif data in ['\x1b[A', '\x1b[B', '\x1bOA', '\x1bOB']:  # Up/Down arrow
                     if data == '\x1b[A' and history_index > 0:
                         history_index -= 1
                     elif data == '\x1b[B' and history_index < len(history):
@@ -1267,7 +1276,7 @@ def read_line_advanced(chan, prompt, history, current_dir, username, fs, session
                     buffer = history[history_index] if 0 <= history_index < len(history) else ""
                     chan.send(b"\r" + b" " * 100 + b"\r" + prompt.encode() + buffer.encode())
                     pos = len(buffer)
-                elif data in ['\x1b[D', '\x1b[C']:  # Left/Right arrow
+                elif data in ['\x1b[D', '\x1b[C', '\x1bOD', '\x1bOC']:  # Left/Right arrow
                     if data == '\x1b[D' and pos > 0:
                         pos -= 1
                         chan.send(b"\x1b[D")
