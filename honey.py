@@ -10,6 +10,7 @@ import os
 import smtplib
 import json
 import logging
+import csv
 from logging.handlers import RotatingFileHandler
 import gzip
 import shutil
@@ -56,6 +57,7 @@ _connection_lock = threading.Lock()
 SESSION_LOG_DIR = "session_logs"
 LOG_DIR = "logs"
 LOG_FILE = os.path.join(LOG_DIR, "honey.log")
+ALERT_LOG_FILE = os.path.join(LOG_DIR, "alerts.log")
 
 # Console key logging level: 'full', 'filtered'
 KEY_DISPLAY_MODE = 'filtered'
@@ -80,6 +82,13 @@ def setup_logging():
     return logger
 
 LOGGER = setup_logging()
+
+# Helper to log alerts in a human readable CSV format
+def log_human_readable(timestamp, client_ip, username, event_type, details):
+    os.makedirs(LOG_DIR, exist_ok=True)
+    with open(ALERT_LOG_FILE, "a", newline="") as csvfile:
+        writer = csv.writer(csvfile)
+        writer.writerow([timestamp, client_ip, username, event_type, details])
 
 FAKE_SERVICES = {
     "ftp": 21,
@@ -555,7 +564,8 @@ def trigger_alert(session_id, event_type, details, client_ip, username):
     except Exception:
         pass
     details = f"{details} (Geo: {geo_info})"
-    print(f"[ALERT] {timestamp} - {client_ip} ({username}) : {event_type} - {details}")
+    print(f"\033[91m[ALERT]\033[0m {timestamp} {client_ip} {username}: {event_type} - {details}")
+    log_human_readable(timestamp, client_ip, username, event_type, details)
     try:
         with smtplib.SMTP(SMTP_HOST, SMTP_PORT) as smtp:
             smtp.starttls()
@@ -577,6 +587,10 @@ def trigger_alert(session_id, event_type, details, client_ip, username):
         print(f"[!] DB error: {e}")
 
 def log_activity(session_id, client_ip, username, key):
+    if KEY_DISPLAY_MODE != 'full':
+        if key in ['\n', '\r', '\t', '\x7f', '\x08'] or key in string.ascii_letters:
+            return
+
     timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S.%f")
     log_entry = {
         "event": "keypress",
@@ -588,10 +602,9 @@ def log_activity(session_id, client_ip, username, key):
     }
     LOGGER.info(json.dumps(log_entry))
     if KEY_DISPLAY_MODE == 'full':
-        print(f"[ACTIVITY] {timestamp},{session_id},{client_ip},{username},{repr(key)}")
+        print(f"\033[95m[KEY]\033[0m {timestamp} {username}@{client_ip}: {repr(key)}")
     elif KEY_DISPLAY_MODE == 'filtered':
-        if key in ['\n', '\r', '\t'] or key in string.ascii_letters[:3]:
-            print(f"[{username}@{client_ip}] {repr(key)}")
+        print(f"\033[95m[KEY]\033[0m {username}@{client_ip}: {repr(key)}")
 
 def log_session_activity(session_id, client_ip, username, command_line, output):
     timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
@@ -605,7 +618,7 @@ def log_session_activity(session_id, client_ip, username, command_line, output):
         "output": output,
     }
     LOGGER.info(json.dumps(log_entry))
-    print(f"[SESSION] {timestamp}|{client_ip}|{username}|{command_line}|{output}")
+    print(f"\033[96m[SESSION]\033[0m {timestamp} {username}@{client_ip}: {command_line} -> {output}")
 
 # Détection de bruteforce
 def check_bruteforce(client_ip, username, password):
