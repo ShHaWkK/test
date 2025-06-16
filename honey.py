@@ -1272,7 +1272,7 @@ def read_line_advanced(chan, prompt, history, current_dir, username, fs, session
                     buffer = autocomplete(buffer, current_dir, username, fs, chan, history)
                     chan.send(b"\r" + b" " * 100 + b"\r" + prompt.encode() + buffer.encode())
                     pos = len(buffer)
-                elif data == '\x7f':  # Backspace
+                elif data == '\x7f' or data == '\x08':  # Backspace (DEL or BS)
                     if pos > 0:
                         buffer = buffer[:pos-1] + buffer[pos:]
                         pos -= 1
@@ -1483,6 +1483,7 @@ def start_server():
             transport = paramiko.Transport(client)
             transport.add_server_key(host_key)
             transport.set_subsystem_handler("sftp", paramiko.SFTPServer, paramiko.SFTPServerInterface)
+            transport.set_keepalive(30)
             
             server = HoneySSHServer(client_ip, session_id)
             transport.start_server(server=server)
@@ -1492,6 +1493,11 @@ def start_server():
                 print(f"[!] No channel for {client_ip}")
                 transport.close()
                 return
+
+            try:
+                chan.get_pty(term='xterm')
+            except Exception:
+                pass
             
             server.event.wait(10)
             if not server.event.is_set():
