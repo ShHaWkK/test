@@ -1530,11 +1530,7 @@ def start_server():
                 transport.close()
                 return
 
-            try:
-                chan.get_pty(term='xterm')
-            except Exception:
-                pass
-            
+            # Wait for the client to request a PTY and shell
             server.event.wait(10)
             if not server.event.is_set():
                 print(f"[!] Client {client_ip} did not request shell")
