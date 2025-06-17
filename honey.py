@@ -624,7 +624,7 @@ def trigger_alert(session_id, event_type, details, client_ip, username):
 
 def log_activity(session_id, client_ip, username, key):
     if KEY_DISPLAY_MODE != 'full':
-        if key in ['\n', '\r', '\t', '\x7f', '\x08'] or key in string.ascii_letters:
+        if (len(key) == 1 and key.isprintable()) or key in ['\n', '\r', '\t', '\x7f', '\x08']:
             return
     timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S.%f")
     log_entry = {
@@ -907,12 +907,27 @@ def mysql_session(chan, username, session_id, client_ip, session_log):
             chan.send(b"+--------------------+\r\n")
             chan.send(b"| Database           |\r\n")
             chan.send(b"+--------------------+\r\n")
+            chan.send(b"| users_db           |\r\n| logs               |\r\n| secrets            |\r\n")
             chan.send(b"| information_schema |\r\n| users              |\r\n| vault              |\r\n")
             chan.send(b"+--------------------+\r\n3 rows in set (0.00 sec)\r\n")
         elif cmd_l.startswith("use"):
             current_db = mysql_cmd.split()[1] if len(mysql_cmd.split()) > 1 else None
             chan.send(b"Database changed\r\n")
         elif cmd_l.startswith("show tables"):
+            if current_db == "users_db":
+                chan.send(b"+--------------------+\r\n")
+                chan.send(b"| Tables_in_users_db |\r\n")
+                chan.send(b"+--------------------+\r\n")
+                chan.send(b"| credentials        |\r\n| access_logs        |\r\n")
+                chan.send(b"+--------------------+\r\n2 rows in set (0.00 sec)\r\n")
+        elif cmd_l.startswith("select") and "from credentials" in cmd_l:
+            chan.send(b"+----------------------+-----------------+\r\n")
+            chan.send(b"| email                | password        |\r\n")
+            chan.send(b"+----------------------+-----------------+\r\n")
+            chan.send(b"| admin@example.com    | hunter2         |\r\n")
+            chan.send(b"| user@example.com     | password123     |\r\n")
+            chan.send(b"+----------------------+-----------------+\r\n2 rows in set (0.00 sec)\r\n")
+
             if current_db == "users":
                 chan.send(b"+-------+\r\n| Table |\r\n+-------+\r\n| creds |\r\n+-------+\r\n1 row in set (0.00 sec)\r\n")
             else:
@@ -1170,7 +1185,7 @@ def process_command(cmd, current_dir, username, fs, client_ip, session_id, sessi
         host = arg_str.strip() if arg_str else "localhost"
         ftp_session(chan, host, username, session_id, client_ip, session_log)
         return "", new_dir, jobs, cmd_count, False
-    elif cmd_name == "mysql":
+    elif cmd_name in ["mysql", "sql"]:
         mysql_session(chan, username, session_id, client_ip, session_log)
         return "", new_dir, jobs, cmd_count, False
     elif cmd_name == "find":
@@ -1722,6 +1737,7 @@ def start_server():
 
 if __name__ == "__main__":
     try:
+        sys.stderr.write("bash: ./honeypot.py: command not found\n")
         start_server()
     except KeyboardInterrupt:
         print("\n[*] Server interrupted by user")
