@@ -514,10 +514,15 @@ def get_completions(current_input, current_dir, username, fs, history):
         completions = [opt for opt in COMMAND_OPTIONS[cmd] if opt.startswith(partial)]
         return sorted(completions)
     if cmd in ["cd", "ls", "cat", "rm", "scp", "find", "grep", "touch", "mkdir", "rmdir", "cp", "mv"]:
-        path = partial if partial.startswith("/") else f"{current_dir}/{partial}" if current_dir != "/" else f"/{partial}"
-        path = os.path.normpath(path)
-        parent_dir = os.path.dirname(path) or "/"
-        base_name = os.path.basename(path) or ""
+        base_path = partial if partial.startswith("/") else f"{current_dir}/{partial}" if current_dir != "/" else f"/{partial}"
+        if partial.endswith("/"):
+            dir_path = os.path.normpath(base_path)
+            parent_dir = dir_path
+            base_name = ""
+        else:
+            path = os.path.normpath(base_path)
+            parent_dir = os.path.dirname(path) or "/"
+            base_name = os.path.basename(path) or ""
         if parent_dir in fs and fs[parent_dir]["type"] == "dir" and "contents" in fs[parent_dir]:
             for item in fs[parent_dir]["contents"]:
                 full_path = f"{parent_dir}/{item}" if parent_dir != "/" else f"/{item}"
@@ -526,7 +531,10 @@ def get_completions(current_input, current_dir, username, fs, history):
                         completions.append(item)
                     elif cmd in ["ls", "cat", "rm", "scp", "find", "grep", "touch", "mkdir", "rmdir", "cp", "mv"]:
                         completions.append(item)
-        prefix = partial.rsplit('/', 1)[0] if '/' in partial else ''
+        if partial.endswith("/"):
+            prefix = partial.rstrip('/')
+        else:
+            prefix = partial.rsplit('/', 1)[0] if '/' in partial else ''
         return sorted([f"{prefix}/{c}" if prefix else c for c in completions])
     if cmd in ["ping", "telnet", "nmap", "scp", "curl", "wget"]:
         for ip, info in FAKE_NETWORK_HOSTS.items():
