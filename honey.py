@@ -538,10 +538,21 @@ def get_completions(current_input, current_dir, username, fs, history):
 def autocomplete(current_input, current_dir, username, fs, chan, history):
     completions = get_completions(current_input, current_dir, username, fs, history)
     if len(completions) == 1:
+        completion = completions[0]
         parts = current_input.split()
+        cmd = parts[0] if parts else ""
+
+        # Add trailing slash if the completion refers to a directory
+        path = completion
+        if cmd in ["cd", "ls", "cat", "rm", "scp", "find", "grep", "touch", "mkdir", "rmdir", "cp", "mv"]:
+            if not completion.startswith("/"):
+                path = os.path.normpath(f"{current_dir}/{completion}" if current_dir != "/" else f"/{completion}")
+            if path in fs and fs[path]["type"] == "dir":
+                completion += "/"
+
         if len(parts) <= 1:
-            return completions[0]
-        parts[-1] = completions[0]
+            return completion
+        parts[-1] = completion
         return " ".join(parts)
     elif completions:
         chan.send(b"\r\n")
@@ -1368,6 +1379,17 @@ def handle_ssh_session(chan, client_ip, username, session_id, transport):
     jobs = []
     cmd_count = 0
     chan.settimeout(0.1)
+
+    # Display a simple MOTD similar to Ubuntu
+    last_login = datetime.now().strftime("%a %b %d %H:%M:%S %Y")
+    motd = (
+        f"Last login: {last_login} from {client_ip}\r\n"
+        "Welcome to Ubuntu 22.04.3 LTS (GNU/Linux 5.15.0-73-generic x86_64)\r\n"
+        " * Documentation:  https://help.ubuntu.com\r\n"
+        " * Management:     https://landscape.canonical.com\r\n"
+        " * Support:        https://ubuntu.com/advantage\r\n\r\n"
+    )
+    chan.send(motd.encode())
     
     try:
         while True:
