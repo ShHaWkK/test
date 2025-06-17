@@ -908,6 +908,7 @@ def mysql_session(chan, username, session_id, client_ip, session_log):
             chan.send(b"| Database           |\r\n")
             chan.send(b"+--------------------+\r\n")
             chan.send(b"| users_db           |\r\n| logs               |\r\n| secrets            |\r\n")
+            chan.send(b"| information_schema |\r\n| users              |\r\n| vault              |\r\n")
             chan.send(b"+--------------------+\r\n3 rows in set (0.00 sec)\r\n")
         elif cmd_l.startswith("use"):
             current_db = mysql_cmd.split()[1] if len(mysql_cmd.split()) > 1 else None
@@ -926,6 +927,13 @@ def mysql_session(chan, username, session_id, client_ip, session_log):
             chan.send(b"| admin@example.com    | hunter2         |\r\n")
             chan.send(b"| user@example.com     | password123     |\r\n")
             chan.send(b"+----------------------+-----------------+\r\n2 rows in set (0.00 sec)\r\n")
+
+            if current_db == "users":
+                chan.send(b"+-------+\r\n| Table |\r\n+-------+\r\n| creds |\r\n+-------+\r\n1 row in set (0.00 sec)\r\n")
+            else:
+                chan.send(b"Empty set (0.00 sec)\r\n")
+        elif "select" in cmd_l and "from users" in cmd_l:
+            chan.send(b"+----+-------+\r\n| id | user  |\r\n+----+-------+\r\n|  1 | admin |\r\n|  2 | guest |\r\n+----+-------+\r\n2 rows in set (0.00 sec)\r\n")
         else:
             chan.send(b"Query OK, 0 rows affected (0.00 sec)\r\n")
     session_log.append("MySQL session closed")
