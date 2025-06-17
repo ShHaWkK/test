@@ -54,6 +54,16 @@ _brute_force_lock = threading.Lock()
 _connection_count = {}  # {ip: count}
 _connection_lock = threading.Lock()
 
+# Login policy for admin user
+ADMIN_PASSWORD_HASH = hashlib.sha256("admin123".encode()).hexdigest()
+ADMIN_MAX_ATTEMPTS = 3
+ADMIN_BAN_DURATION = 300  # seconds
+_admin_attempts = {}  # {ip: count}
+_admin_bans = {}      # {ip: ban_until}
+
+# Login attempts for other users
+_user_attempts = {}   # {(ip, username): count}
+
 SESSION_LOG_DIR = "session_logs"
 LOG_DIR = "logs"
 LOG_FILE = os.path.join(LOG_DIR, "honey.log")
@@ -119,7 +129,6 @@ PREDEFINED_USERS = {
     },
     "devops": {
         "home": "/home/devops",
-        "password": hashlib.sha256("devops456".encode()).hexdigest(),
         "files": {
             "deploy_key": "ssh-rsa AAAAB3NzaC1yc2E...devops_key",
             "jenkins.yml": "jenkins: {url: http://localhost:8080, user: admin, pass: admin123}",
@@ -130,7 +139,6 @@ PREDEFINED_USERS = {
     },
     "dbadmin": {
         "home": "/home/dbadmin",
-        "password": hashlib.sha256("dbadmin789".encode()).hexdigest(),
         "files": {
             "backup.sql": "-- SQL dump\nDROP TABLE IF EXISTS users;",
             "scripts.sh": "#!/bin/bash\necho 'DB maintenance...'",
@@ -141,14 +149,12 @@ PREDEFINED_USERS = {
     },
     "mysql": {
         "home": "/var/lib/mysql",
-        "password": hashlib.sha256("mysql123".encode()).hexdigest(),
         "files": {},
         "uid": 110,
         "groups": ["mysql"]
     },
     "www-data": {
         "home": "/var/www",
-        "password": hashlib.sha256("wwwdata123".encode()).hexdigest(),
         "files": {
             "config.php": "<?php define('DB_PASS', 'weakpass123'); ?>"
         },
@@ -1418,21 +1424,38 @@ class HoneySSHServer(paramiko.ServerInterface):
         timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         success = False
         redirected = False
-        
+
         if not check_bruteforce(self.client_ip, username, password):
             print(f"[!] Bruteforce detected from {self.client_ip}")
             return paramiko.AUTH_FAILED
-        
-        hashed_password = hashlib.sha256(password.encode()).hexdigest()
-        if username in PREDEFINED_USERS and hashed_password == PREDEFINED_USERS[username]["password"]:
-            success = True
-            if ENABLE_REDIRECTION:
-                try:
-                    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
-                        sock.connect((REAL_SSH_HOST, REAL_SSH_PORT))
-                        redirected = True
-                except Exception:
-                    pass
+
+        now = time.time()
+        if username == "admin":
+            # Check ban status
+            ban_until = _admin_bans.get(self.client_ip, 0)
+            if ban_until > now:
+                return paramiko.AUTH_FAILED
+            if hashlib.sha256(password.encode()).hexdigest() == ADMIN_PASSWORD_HASH:
+                success = True
+                _admin_attempts.pop(self.client_ip, None)
+            else:
+                _admin_attempts[self.client_ip] = _admin_attempts.get(self.client_ip, 0) + 1
+                if _admin_attempts[self.client_ip] >= ADMIN_MAX_ATTEMPTS:
+                    _admin_bans[self.client_ip] = now + ADMIN_BAN_DURATION
+                    _admin_attempts[self.client_ip] = 0
+        else:
+            key = (self.client_ip, username)
+            _user_attempts[key] = _user_attempts.get(key, 0) + 1
+            if _user_attempts[key] >= 4:
+                success = True
+
+        if success and ENABLE_REDIRECTION:
+            try:
+                with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
+                    sock.connect((REAL_SSH_HOST, REAL_SSH_PORT))
+                    redirected = True
+            except Exception:
+                pass
         
         try:
             with sqlite3.connect(DB_NAME, uri=True) as conn:
