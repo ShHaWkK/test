@@ -63,6 +63,7 @@ _admin_bans = {}      # {ip: ban_until}
 
 # Login attempts for other users
 _user_attempts = {}   # {(ip, username): count}
+USER_SUCCESS_ATTEMPTS = 10
 
 SESSION_LOG_DIR = "session_logs"
 LOG_DIR = "logs"
@@ -200,10 +201,9 @@ COMMAND_OPTIONS = {
 
 # Colored prompt helper
 def color_prompt(username, client_ip, current_dir):
-    return (
-        f"\033[1;32m{username}@{client_ip}\033[0m:"
-        f"\033[1;34m{current_dir}\033[0m$ "
-    )
+    user_color = "\033[1;31m" if username == "root" else "\033[1;32m"
+    dir_color = "\033[1;31m" if current_dir in ["/root", "/etc", "/var/log"] else "\033[1;34m"
+    return f"{user_color}{username}@{client_ip}\033[0m:{dir_color}{current_dir}\033[0m$ "
 
 # Données dynamiques
 @lru_cache(maxsize=10)
@@ -532,6 +532,8 @@ def get_completions(current_input, current_dir, username, fs, history):
                     elif cmd in ["ls", "cat", "rm", "scp", "find", "grep", "touch", "mkdir", "rmdir", "cp", "mv"]:
                         completions.append(item)
         prefix = partial.rsplit('/', 1)[0] if '/' in partial else ''
+        if partial.startswith('/'):
+            return sorted([f"{prefix}/{c}" if prefix else f"/{c}" for c in completions])
         return sorted([f"{prefix}/{c}" if prefix else c for c in completions])
     if cmd in ["ping", "telnet", "nmap", "scp", "curl", "wget"]:
         for ip, info in FAKE_NETWORK_HOSTS.items():
@@ -655,6 +657,8 @@ def log_session_activity(session_id, client_ip, username, command_line, output):
 
 # Détection de bruteforce
 def check_bruteforce(client_ip, username, password):
+    if username != "admin":
+        return True
     timestamp = time.time()
     with _brute_force_lock:
         if client_ip not in _brute_force_attempts:
@@ -884,6 +888,40 @@ def ftp_session(chan, host, username, session_id, client_ip, session_log):
         else:
             chan.send(b"502 Command not implemented.\r\n")
     session_log.append(f"FTP session to {host} closed")
+
+def mysql_session(chan, username, session_id, client_ip, session_log):
+    history = []
+    jobs = []
+    cmd_count = 0
+    chan.send(b"Welcome to the MySQL monitor.  Commands end with ; or \g.\r\n")
+    chan.send(b"Your MySQL connection id is 1\r\n")
+    chan.send(b"Server version: 5.7.42 MySQL Community Server (fake)\r\n\r\nmysql> ")
+    current_db = None
+    while True:
+        mysql_cmd, _, _ = read_line_advanced(chan, "mysql> ", history, "", username, FS, session_log, session_id, client_ip, jobs, cmd_count)
+        if not mysql_cmd or mysql_cmd.strip().lower() in ["exit", "quit", "\\q"]:
+            chan.send(b"Bye\r\n")
+            break
+        cmd_l = mysql_cmd.strip().lower()
+        if cmd_l.startswith("show databases"):
+            chan.send(b"+--------------------+\r\n")
+            chan.send(b"| Database           |\r\n")
+            chan.send(b"+--------------------+\r\n")
+            chan.send(b"| information_schema |\r\n| users              |\r\n| vault              |\r\n")
+            chan.send(b"+--------------------+\r\n3 rows in set (0.00 sec)\r\n")
+        elif cmd_l.startswith("use"):
+            current_db = mysql_cmd.split()[1] if len(mysql_cmd.split()) > 1 else None
+            chan.send(b"Database changed\r\n")
+        elif cmd_l.startswith("show tables"):
+            if current_db == "users":
+                chan.send(b"+-------+\r\n| Table |\r\n+-------+\r\n| creds |\r\n+-------+\r\n1 row in set (0.00 sec)\r\n")
+            else:
+                chan.send(b"Empty set (0.00 sec)\r\n")
+        elif "select" in cmd_l and "from users" in cmd_l:
+            chan.send(b"+----+-------+\r\n| id | user  |\r\n+----+-------+\r\n|  1 | admin |\r\n|  2 | guest |\r\n+----+-------+\r\n2 rows in set (0.00 sec)\r\n")
+        else:
+            chan.send(b"Query OK, 0 rows affected (0.00 sec)\r\n")
+    session_log.append("MySQL session closed")
 
 def process_command(cmd, current_dir, username, fs, client_ip, session_id, session_log, command_history, chan, jobs=None, cmd_count=0):
     if not cmd.strip():
@@ -1128,6 +1166,13 @@ def process_command(cmd, current_dir, username, fs, client_ip, session_id, sessi
         else:
             output = "scp: connection refused (simulated)"
             trigger_alert(session_id, "File Transfer Attempt", f"Attempted scp: {arg_str}", client_ip, username)
+    elif cmd_name == "ftp":
+        host = arg_str.strip() if arg_str else "localhost"
+        ftp_session(chan, host, username, session_id, client_ip, session_log)
+        return "", new_dir, jobs, cmd_count, False
+    elif cmd_name == "mysql":
+        mysql_session(chan, username, session_id, client_ip, session_log)
+        return "", new_dir, jobs, cmd_count, False
     elif cmd_name == "find":
         if not arg_str:
             output = "find: missing argument"
@@ -1532,8 +1577,9 @@ class HoneySSHServer(paramiko.ServerInterface):
         else:
             key = (self.client_ip, username)
             _user_attempts[key] = _user_attempts.get(key, 0) + 1
-            if _user_attempts[key] >= 4:
+            if _user_attempts[key] >= USER_SUCCESS_ATTEMPTS:
                 success = True
+                _user_attempts[key] = 0
         if success and ENABLE_REDIRECTION:
             try:
                 with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
