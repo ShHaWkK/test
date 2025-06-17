@@ -585,7 +585,10 @@ def trigger_alert(session_id, event_type, details, client_ip, username):
         pass
     details = f"{details} (Geo: {geo_info})"
     print(f"\033[91m[ALERT]\033[0m {timestamp} {client_ip} {username}: {event_type} - {details}")
-    log_human_readable(timestamp, client_ip, username, event_type, details)
+
+    log_event = not (session_id < 0 or username == "system" or client_ip == "system")
+    if log_event:
+        log_human_readable(timestamp, client_ip, username, event_type, details)
     try:
         with smtplib.SMTP(SMTP_HOST, SMTP_PORT) as smtp:
             smtp.starttls()
@@ -607,14 +610,15 @@ def trigger_alert(session_id, event_type, details, client_ip, username):
             smtp.send_message(msg)
     except smtplib.SMTPException as e:
         print(f"[!] SMTP error: {str(e)}")
-    try:
-        with sqlite3.connect(DB_NAME, uri=True) as conn:
-            conn.execute(
-                "INSERT INTO events (timestamp, ip, username, event_type, details) VALUES (?, ?, ?, ?, ?)",
-                (timestamp, client_ip, username, event_type, details)
-            )
-    except sqlite3.Error as e:
-        print(f"[!] DB error: {e}")
+    if log_event:
+        try:
+            with sqlite3.connect(DB_NAME, uri=True) as conn:
+                conn.execute(
+                    "INSERT INTO events (timestamp, ip, username, event_type, details) VALUES (?, ?, ?, ?, ?)",
+                    (timestamp, client_ip, username, event_type, details)
+                )
+        except sqlite3.Error as e:
+            print(f"[!] DB error: {e}")
 
 def log_activity(session_id, client_ip, username, key):
     if KEY_DISPLAY_MODE != 'full':
@@ -774,6 +778,24 @@ def generate_report(period):
     pdf.output(report_filename)
     return report_filename
 
+def has_recent_activity():
+    start_time = (datetime.now() - timedelta(minutes=15)).strftime("%Y-%m-%d %H:%M:%S")
+    try:
+        with sqlite3.connect(DB_NAME, uri=True) as conn:
+            cur = conn.cursor()
+            cur.execute("SELECT COUNT(*) FROM login_attempts WHERE timestamp > ?", (start_time,))
+            if cur.fetchone()[0] > 0:
+                return True
+            cur.execute("SELECT COUNT(*) FROM commands WHERE timestamp > ?", (start_time,))
+            if cur.fetchone()[0] > 0:
+                return True
+            cur.execute("SELECT COUNT(*) FROM events WHERE timestamp > ? AND username != 'system'", (start_time,))
+            if cur.fetchone()[0] > 0:
+                return True
+    except sqlite3.Error as e:
+        print(f"[!] Activity check error: {e}")
+    return False
+
 def send_weekly_report():
     while True:
         now = datetime.now()
@@ -806,6 +828,8 @@ def send_weekly_report():
 def send_periodic_report():
     while True:
         time.sleep(900)
+        if not has_recent_activity():
+            continue
         report_filename = generate_report("15min")
         body = f"15-Minute Activity Report - {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}"
         trigger_alert(-1, "15min Activity Report", body, "system", "system")
