@@ -1474,6 +1474,7 @@ class HoneySSHServer(paramiko.ServerInterface):
         timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         success = False
         redirected = False
+        
         if not check_bruteforce(self.client_ip, username, password):
             print(f"[!] Bruteforce detected from {self.client_ip}")
             return paramiko.AUTH_FAILED
@@ -1545,7 +1546,8 @@ def start_server():
     threading.Thread(target=cleanup_trap_files, args=(FS,), daemon=True).start()
     
     executor = ThreadPoolExecutor(max_workers=50)
-        def signal_handler(sig, frame):
+    
+    def signal_handler(sig, frame):
         print("\n[*] Shutting down server...")
         server_socket.close()
         DB_CONN.close()
