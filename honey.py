@@ -526,7 +526,8 @@ def get_completions(current_input, current_dir, username, fs, history):
                         completions.append(item)
                     elif cmd in ["ls", "cat", "rm", "scp", "find", "grep", "touch", "mkdir", "rmdir", "cp", "mv"]:
                         completions.append(item)
-        return sorted([f"{partial.rsplit('/', 1)[0]}/{c}" if partial.rsplit('/', 1)[0] else c for c in completions])
+        prefix = partial.rsplit('/', 1)[0] if '/' in partial else ''
+        return sorted([f"{prefix}/{c}" if prefix else c for c in completions])
     if cmd in ["ping", "telnet", "nmap", "scp", "curl", "wget"]:
         for ip, info in FAKE_NETWORK_HOSTS.items():
             if info["name"].startswith(partial) or ip.startswith(partial):
@@ -814,6 +815,18 @@ def cleanup_trap_files(fs):
         time.sleep(3600)
 
 # Traitement des commandes
+
+def _format_ls_columns(items, width=80):
+    if not items:
+        return ""
+    max_len = max(len(it) for it in items) + 2
+    cols = max(1, width // max_len)
+    lines = []
+    for i in range(0, len(items), cols):
+        row = items[i:i + cols]
+        lines.append("".join(it.ljust(max_len) for it in row))
+    return "\n".join(lines)
+
 def ftp_session(chan, host, username, session_id, client_ip, session_log):
     history = []
     jobs = []
@@ -883,7 +896,8 @@ def process_command(cmd, current_dir, username, fs, client_ip, session_id, sessi
                         fs[path]["contents"].append(trap_file)
                         fs[f"{path}/{trap_file}"] = {"type": "file", "content": f"Data {random.randint(1, 1000)}", "owner": "root", "permissions": "rw-r--r--", "mtime": datetime.now().strftime("%Y-%m-%d %H:%M:%S"), "expires": time.time() + 3600}
                         trigger_alert(session_id, "Trap Triggered", f"User {username} triggered trap {trap_file} in {path}", client_ip, username)
-                output = " ".join(f for f in fs[path]["contents"] if not f.startswith(".trap_") or fs.get(f"{path}/{f}", {}).get("expires", 0) > time.time())
+                files = [f for f in fs[path]["contents"] if not f.startswith(".trap_") or fs.get(f"{path}/{f}", {}).get("expires", 0) > time.time()]
+                output = _format_ls_columns(sorted(files))
         else:
             output = f"ls: cannot access '{arg_str}': No such file or directory"
     elif cmd_name == "cd":
@@ -891,8 +905,9 @@ def process_command(cmd, current_dir, username, fs, client_ip, session_id, sessi
         if path.startswith("~"):
             path = path.replace("~", f"/home/{username}", 1)
         path = os.path.normpath(path if path.startswith("/") else f"{current_dir}/{path}")
-        if path in fs and fs[path]["type"] == "dir":
-            new_dir = path
+        path_key = path.rstrip('/') or '/'
+        if path_key in fs and fs[path_key]["type"] == "dir":
+            new_dir = path_key
         else:
             output = f"cd: {arg_str}: No such file or directory"
     elif cmd_name == "cat":
@@ -1305,7 +1320,11 @@ def read_line_advanced(chan, prompt, history, current_dir, username, fs, session
                         chan.send(b"\b \b")
                 elif data == '\x03':  # Ctrl+C
                     chan.send(b"^C\r\n")
-                    return "", jobs, cmd_count
+                    buffer = ""
+                    pos = 0
+                    history_index = len(history)
+                    chan.send(prompt.encode())
+                    continue
                 elif data == '\x04':  # Ctrl+D
                     chan.send(b"logout\r\n")
                     return "exit", jobs, cmd_count
@@ -1577,6 +1596,7 @@ def start_server():
         server_socket.close()
         DB_CONN.close()
         FS_CONN.close()
+        executor.shutdown(wait=False, cancel_futures=True)
         sys.exit(0)
     
     signal.signal(signal.SIGINT, signal_handler)
@@ -1589,8 +1609,9 @@ def start_server():
             break
         except Exception as e:
             print(f"[!] Server error: {e}")
-    
+
     server_socket.close()
+    executor.shutdown(wait=False, cancel_futures=True)
     DB_CONN.close()
     FS_CONN.close()
 
