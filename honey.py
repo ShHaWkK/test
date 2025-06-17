@@ -816,15 +816,21 @@ def cleanup_trap_files(fs):
 
 # Traitement des commandes
 
+ANSI_RE = re.compile(r"\x1b\[[0-9;]*m")
+
+def _visible_len(text: str) -> int:
+    return len(ANSI_RE.sub("", text))
+
 def _format_ls_columns(items, width=80):
     if not items:
         return ""
-    max_len = max(len(it) for it in items) + 2
+    max_len = max(_visible_len(it) for it in items) + 2
     cols = max(1, width // max_len)
     lines = []
     for i in range(0, len(items), cols):
         row = items[i:i + cols]
-        lines.append("".join(it.ljust(max_len) for it in row))
+        padded = [it + " " * (max_len - _visible_len(it)) for it in row]
+        lines.append("".join(padded))
     return "\n".join(lines)
 
 def ftp_session(chan, host, username, session_id, client_ip, session_log):
@@ -897,7 +903,19 @@ def process_command(cmd, current_dir, username, fs, client_ip, session_id, sessi
                         fs[f"{path}/{trap_file}"] = {"type": "file", "content": f"Data {random.randint(1, 1000)}", "owner": "root", "permissions": "rw-r--r--", "mtime": datetime.now().strftime("%Y-%m-%d %H:%M:%S"), "expires": time.time() + 3600}
                         trigger_alert(session_id, "Trap Triggered", f"User {username} triggered trap {trap_file} in {path}", client_ip, username)
                 files = [f for f in fs[path]["contents"] if not f.startswith(".trap_") or fs.get(f"{path}/{f}", {}).get("expires", 0) > time.time()]
-                output = _format_ls_columns(sorted(files))
+                colored = []
+                for name in sorted(files):
+                    full = f"{path}/{name}" if path != "/" else f"/{name}"
+                    if full in fs:
+                        if fs[full]["type"] == "dir":
+                            colored.append(f"\033[01;34m{name}\033[0m")
+                        elif "x" in fs[full].get("permissions", ""):
+                            colored.append(f"\033[01;32m{name}\033[0m")
+                        else:
+                            colored.append(name)
+                    else:
+                        colored.append(name)
+                output = _format_ls_columns(colored)
         else:
             output = f"ls: cannot access '{arg_str}': No such file or directory"
     elif cmd_name == "cd":
