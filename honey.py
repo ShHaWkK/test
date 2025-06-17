@@ -1257,14 +1257,18 @@ def process_command(cmd, current_dir, username, fs, client_ip, session_id, sessi
 # Lecture interactive des lignes avec autocomplétion
 def _read_escape_sequence(chan):
     seq = ""
-    # Read remaining bytes of an ANSI escape sequence without blocking
     while True:
-        readable, _, _ = select.select([chan], [], [], 0.005)
+        readable, _, _ = select.select([chan], [], [], 0.01)
         if not readable:
             break
         try:
-            seq += chan.recv(1).decode("utf-8", errors="ignore")
+            ch = chan.recv(1).decode("utf-8", errors="ignore")
         except Exception:
+            break
+        if not ch:
+            break
+        seq += ch
+        if ch.isalpha() or ch == "~":
             break
     return seq
 
@@ -1282,15 +1286,7 @@ def read_line_advanced(chan, prompt, history, current_dir, username, fs, session
                 if not data:
                     return "", jobs, cmd_count
                 if data == '\x1b':
-                    seq = data
-                    # Lire jusqu'à 2 caractères supplémentaires pour compléter la séquence ANSI
-                    for _ in range(2):
-                        readable, _, _ = select.select([chan], [], [], 0.01)
-                        if readable:
-                            seq += chan.recv(1).decode('utf-8', errors='ignore')
-                        else:
-                            break
-                    data = seq
+                    data += _read_escape_sequence(chan)
                 log_activity(session_id, client_ip, username, data)
                 
                 if data == '\r' or data == '\n':
@@ -1354,6 +1350,9 @@ def read_password(chan):
         if readable:
             try:
                 data = chan.recv(1).decode('utf-8', errors='ignore')
+                if data == '\x1b':
+                    _read_escape_sequence(chan)
+                    continue
                 if data == '\r' or data == '\n':
                     chan.send(b"\r\n")
                     return buffer
