@@ -590,10 +590,20 @@ def trigger_alert(session_id, event_type, details, client_ip, username):
         with smtplib.SMTP(SMTP_HOST, SMTP_PORT) as smtp:
             smtp.starttls()
             smtp.login(SMTP_USER, SMTP_PASS)
-            msg = MIMEText(f"Time: {timestamp}\nIP: {client_ip}\nUser: {username}\nEvent: {event_type}\nDetails: {details}")
+            subject = f"ALERTE SÉCURITÉ - {event_type}"
+            body = (
+                f"🚨 [ALERTE SÉCURITÉ - {event_type}]\n\n"
+                f"- Utilisateur      : {username}\n"
+                f"- Adresse IP       : {client_ip}\n"
+                f"- Heure exacte     : {timestamp}\n"
+                f"- Géolocalisation  : {geo_info}\n"
+                f"- Session ID       : {session_id}\n\n"
+                f"Détails : {details}"
+            )
+            msg = MIMEText(body)
             msg["From"] = ALERT_FROM
             msg["To"] = ALERT_TO
-            msg["Subject"] = f"Security Alert - {event_type}"
+            msg["Subject"] = subject
             smtp.send_message(msg)
     except smtplib.SMTPException as e:
         print(f"[!] SMTP error: {str(e)}")
@@ -1464,6 +1474,7 @@ class HoneySSHServer(paramiko.ServerInterface):
         self.client_ip = client_ip
         self.session_id = session_id
         self.event = threading.Event()
+        self.username = None
     
     def check_channel_request(self, kind, chanid):
         if kind == "session":
@@ -1474,6 +1485,9 @@ class HoneySSHServer(paramiko.ServerInterface):
         timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         success = False
         redirected = False
+
+        # Store username for later retrieval
+        self.username = username
         
         if not check_bruteforce(self.client_ip, username, password):
             print(f"[!] Bruteforce detected from {self.client_ip}")
@@ -1520,6 +1534,9 @@ class HoneySSHServer(paramiko.ServerInterface):
         if success and not redirected:
             return paramiko.AUTH_SUCCESSFUL
         return paramiko.AUTH_FAILED
+
+    def get_authenticated_username(self):
+        return self.username
     
     def check_channel_shell_request(self, channel):
         self.event.set()
