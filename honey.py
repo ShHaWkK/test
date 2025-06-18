@@ -893,6 +893,14 @@ def mysql_session(chan, username, session_id, client_ip, session_log):
     history = []
     jobs = []
     cmd_count = 0
+    fake_databases = {
+        "users_db": ["credentials", "access_logs"],
+        "logs": ["events", "connections"],
+        "secrets": ["flags"],
+        "information_schema": [],
+        "users": ["creds"],
+        "vault": ["keys"],
+    }
     chan.send(b"Welcome to the MySQL monitor.  Commands end with ; or \g.\r\n")
     chan.send(b"Your MySQL connection id is 1\r\n")
     chan.send(b"Server version: 5.7.42 MySQL Community Server (fake)\r\n\r\nmysql> ")
@@ -903,23 +911,31 @@ def mysql_session(chan, username, session_id, client_ip, session_log):
             chan.send(b"Bye\r\n")
             break
         cmd_l = mysql_cmd.strip().lower()
-        if cmd_l.startswith("show databases"):
+        if cmd_l.startswith("show databases") or cmd_l.startswith("show database"):
             chan.send(b"+--------------------+\r\n")
             chan.send(b"| Database           |\r\n")
             chan.send(b"+--------------------+\r\n")
-            chan.send(b"| users_db           |\r\n| logs               |\r\n| secrets            |\r\n")
-            chan.send(b"| information_schema |\r\n| users              |\r\n| vault              |\r\n")
-            chan.send(b"+--------------------+\r\n3 rows in set (0.00 sec)\r\n")
+            for db in fake_databases.keys():
+                chan.send(f"| {db.ljust(18)} |\r\n".encode())
+            chan.send(b"+--------------------+\r\n")
+            rows = str(len(fake_databases))
+            chan.send(f"{rows} rows in set (0.00 sec)\r\n".encode())
         elif cmd_l.startswith("use"):
             current_db = mysql_cmd.split()[1] if len(mysql_cmd.split()) > 1 else None
             chan.send(b"Database changed\r\n")
         elif cmd_l.startswith("show tables"):
-            if current_db == "users_db":
-                chan.send(b"+--------------------+\r\n")
-                chan.send(b"| Tables_in_users_db |\r\n")
-                chan.send(b"+--------------------+\r\n")
-                chan.send(b"| credentials        |\r\n| access_logs        |\r\n")
-                chan.send(b"+--------------------+\r\n2 rows in set (0.00 sec)\r\n")
+            if not current_db or current_db not in fake_databases:
+                chan.send(b"Empty set (0.00 sec)\r\n")
+            else:
+                tables = fake_databases[current_db]
+                header = f"| Tables_in_{current_db} |"
+                chan.send(b"+" + b"-" * (len(header) - 2) + b"+\r\n")
+                chan.send(f"{header}\r\n".encode())
+                chan.send(b"+" + b"-" * (len(header) - 2) + b"+\r\n")
+                for t in tables:
+                    chan.send(f"| {t.ljust(len(header)-4)} |\r\n".encode())
+                chan.send(b"+" + b"-" * (len(header) - 2) + b"+\r\n")
+                chan.send(f"{len(tables)} rows in set (0.00 sec)\r\n".encode())
         elif cmd_l.startswith("select") and "from credentials" in cmd_l:
             chan.send(b"+----------------------+-----------------+\r\n")
             chan.send(b"| email                | password        |\r\n")
@@ -1439,22 +1455,19 @@ def read_line_advanced(chan, prompt, history, current_dir, username, fs, session
                         if history_index > 0:
                             history_index -= 1
                             buffer = history[history_index] if 0 <= history_index < len(history) else ""
-                            chan.send(b"\r" + b" " * 100 + b"\r" + prompt.encode() + buffer.encode())
                             pos = len(buffer)
                     elif data == '\x1b[B':  # Flèche bas
                         if history_index < len(history):
                             history_index += 1
                             buffer = history[history_index] if 0 <= history_index < len(history) else ""
-                            chan.send(b"\r" + b" " * 100 + b"\r" + prompt.encode() + buffer.encode())
                             pos = len(buffer)
                     elif data == '\x1b[C':  # Flèche droite
                         if pos < len(buffer):
                             pos += 1
-                            chan.send(b"\x1b[C")
                     elif data == '\x1b[D':  # Flèche gauche
                         if pos > 0:
                             pos -= 1
-                            chan.send(b"\x1b[D")
+                    chan.send(b"\r" + b" " * 100 + b"\r" + prompt.encode() + buffer.encode())
                 elif len(data) == 1 and ord(data) >= 32:  # Caractères imprimables
                     buffer = buffer[:pos] + data + buffer[pos:]
                     pos += 1
@@ -1737,10 +1750,9 @@ def start_server():
 
 if __name__ == "__main__":
     try:
-        sys.stderr.write("bash: ./honeypot.py: command not found\n")
         start_server()
     except KeyboardInterrupt:
-        print("\n[*] Server interrupted by user")
+        print("\n[*] Serveur arrêté proprement")
     except Exception as e:
         print(f"[!] Fatal error: {e}")
     finally:
