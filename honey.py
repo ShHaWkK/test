@@ -302,7 +302,7 @@ def get_dynamic_messages():
             f"{service}: Suspicious activity on port {random.randint(1024, 65535)}"
         ])
         lines.append(f"{timestamp} debian {message}")
-    return "\n".join(lines)
+    return "\r\n".join(lines)
 
 @lru_cache(maxsize=10)
 def get_dynamic_dmesg():
@@ -316,7 +316,7 @@ def get_dynamic_dmesg():
             "kernel: ACPI: Power Button [PWRB]"
         ])
         lines.append(f"{timestamp} {message}")
-    return "\n".join(lines)
+    return "\r\n".join(lines)
 
 @lru_cache(maxsize=10)
 def get_dynamic_network_scan():
@@ -326,7 +326,7 @@ def get_dynamic_network_scan():
             port = FAKE_SERVICES.get(service, 0)
             if port:
                 lines.append(f"{ip}:{port} open {service}")
-    return "\n".join(lines)
+    return "\r\n".join(lines)
 
 @lru_cache(maxsize=10)
 def get_dynamic_arp():
@@ -334,7 +334,7 @@ def get_dynamic_arp():
     for ip in FAKE_NETWORK_HOSTS:
         mac = ":".join([f"{random.randint(0, 255):02x}" for _ in range(6)])
         lines.append(f"{ip:<24} ether   {mac}   C                     eth0")
-    return "\n".join(lines)
+    return "\r\n".join(lines)
 
 @lru_cache(maxsize=10)
 def get_dynamic_who():
@@ -345,7 +345,7 @@ def get_dynamic_who():
         tty = random.choice(["pts/0", "pts/1", "tty7"])
         host = f"192.168.1.{random.randint(10, 50)}"
         lines.append(f"{user:<10} {tty:<8} {timestamp} {host}")
-    return "\n".join(lines)
+    return "\r\n".join(lines)
 
 @lru_cache(maxsize=10)
 def get_dynamic_w():
@@ -864,7 +864,7 @@ def _format_ls_columns(items, width=80):
         row = items[i:i + cols]
         padded = [it + " " * (max_len - _visible_len(it)) for it in row]
         lines.append("".join(padded))
-    return "\n".join(lines)
+    return "\r\n".join(lines)
 
 def ftp_session(chan, host, username, session_id, client_ip, session_log):
     history = []
@@ -874,7 +874,7 @@ def ftp_session(chan, host, username, session_id, client_ip, session_log):
     _, _, _ = read_line_advanced(chan, "", history, "", username, FS, session_log, session_id, client_ip, jobs, cmd_count)
     chan.send(b"331 Please specify the password.\r\nPassword: ")
     _, _, _ = read_line_advanced(chan, "", history, "", username, FS, session_log, session_id, client_ip, jobs, cmd_count)
-    chan.send(b"230 Login successful.\r\nftp> ")
+    chan.send(b"230 Login successful.\r\n")
     while True:
         ftp_cmd, _, _ = read_line_advanced(chan, "ftp> ", history, "", username, FS, session_log, session_id, client_ip, jobs, cmd_count)
         if not ftp_cmd or ftp_cmd.strip().lower() in ["quit", "exit", "bye"]:
@@ -903,7 +903,7 @@ def mysql_session(chan, username, session_id, client_ip, session_log):
     }
     chan.send(b"Welcome to the MySQL monitor.  Commands end with ; or \g.\r\n")
     chan.send(b"Your MySQL connection id is 1\r\n")
-    chan.send(b"Server version: 5.7.42 MySQL Community Server (fake)\r\n\r\nmysql> ")
+    chan.send(b"Server version: 5.7.42 MySQL Community Server (fake)\r\n\r\n")
     current_db = None
     while True:
         mysql_cmd, _, _ = read_line_advanced(chan, "mysql> ", history, "", username, FS, session_log, session_id, client_ip, jobs, cmd_count)
@@ -1189,7 +1189,7 @@ def process_command(cmd, current_dir, username, fs, client_ip, session_id, sessi
             output = "telnet: missing host"
         else:
             host = arg_str.split()[0]
-            output = f"Trying {host}...\nConnection refused"
+            output = f"Trying {host}...\r\nConnection refused"
             trigger_alert(session_id, "Telnet Attempt", f"Attempted telnet to {host}", client_ip, username)
     elif cmd_name == "scp":
         if not arg_str:
@@ -1541,7 +1541,8 @@ def handle_ssh_session(chan, client_ip, username, session_id, transport):
                 history, chan, jobs, cmd_count
             )
             if output:
-                chan.send((output + "\r\n").encode())
+                formatted = output.replace("\n", "\r\n")
+                chan.send((formatted + "\r\n").encode())
             if should_exit:
                 break
             
