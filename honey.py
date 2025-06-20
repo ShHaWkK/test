@@ -426,6 +426,25 @@ BASE_FILE_SYSTEM = {
     "/var/www": {"type": "dir", "contents": ["html"], "owner": "www-data", "permissions": "rwxr-xr-x", "mtime": datetime.now().strftime("%Y-%m-%d %H:%M:%S")},
     "/var/www/html": {"type": "dir", "contents": ["index.html", "config.php"], "owner": "www-data", "permissions": "rwxr-xr-x", "mtime": datetime.now().strftime("%Y-%m-%d %H:%M:%S")},
     "/var/www/html/index.html": {"type": "file", "content": "<html><body><h1>Welcome to Server</h1></body></html>", "owner": "www-data", "permissions": "rw-r--r--", "mtime": datetime.now().strftime("%Y-%m-%d %H:%M:%S")},
+    "/opt": {"type": "dir", "contents": ["scripts", "backups", "secret"], "owner": "root", "permissions": "rwxr-xr-x", "mtime": datetime.now().strftime("%Y-%m-%d %H:%M:%S")},
+    "/opt/scripts": {"type": "dir", "contents": [], "owner": "root", "permissions": "rwxr-xr-x", "mtime": datetime.now().strftime("%Y-%m-%d %H:%M:%S")},
+    "/opt/backups": {"type": "dir", "contents": [], "owner": "root", "permissions": "rwx------", "mtime": datetime.now().strftime("%Y-%m-%d %H:%M:%S")},
+    "/opt/secret": {"type": "dir", "contents": ["passwords.txt"], "owner": "root", "permissions": "rwx------", "mtime": datetime.now().strftime("%Y-%m-%d %H:%M:%S")},
+    "/opt/secret/passwords.txt": {"type": "file", "content": "root:toor\nadmin:admin123", "owner": "root", "permissions": "rw-------", "mtime": datetime.now().strftime("%Y-%m-%d %H:%M:%S")},
+    "/usr/local": {"type": "dir", "contents": ["bin", "share"], "owner": "root", "permissions": "rwxr-xr-x", "mtime": datetime.now().strftime("%Y-%m-%d %H:%M:%S")},
+    "/usr/local/bin": {"type": "dir", "contents": ["cleanup.sh"], "owner": "root", "permissions": "rwxr-xr-x", "mtime": datetime.now().strftime("%Y-%m-%d %H:%M:%S")},
+    "/usr/local/bin/cleanup.sh": {"type": "file", "content": "#!/bin/bash\necho 'Cleaning...'", "owner": "root", "permissions": "rwxr-xr-x", "mtime": datetime.now().strftime("%Y-%m-%d %H:%M:%S")},
+    "/usr/local/share": {"type": "dir", "contents": ["man"], "owner": "root", "permissions": "rwxr-xr-x", "mtime": datetime.now().strftime("%Y-%m-%d %H:%M:%S")},
+    "/usr/local/share/man": {"type": "dir", "contents": [], "owner": "root", "permissions": "rwxr-xr-x", "mtime": datetime.now().strftime("%Y-%m-%d %H:%M:%S")},
+    "/srv": {"type": "dir", "contents": ["ftp", "www"], "owner": "root", "permissions": "rwxr-xr-x", "mtime": datetime.now().strftime("%Y-%m-%d %H:%M:%S")},
+    "/srv/ftp": {"type": "dir", "contents": [], "owner": "root", "permissions": "rwxr-xr-x", "mtime": datetime.now().strftime("%Y-%m-%d %H:%M:%S")},
+    "/srv/www": {"type": "dir", "contents": [], "owner": "root", "permissions": "rwxr-xr-x", "mtime": datetime.now().strftime("%Y-%m-%d %H:%M:%S")},
+    "/var/backups": {"type": "dir", "contents": ["db_backup.sql"], "owner": "root", "permissions": "rwx------", "mtime": datetime.now().strftime("%Y-%m-%d %H:%M:%S")},
+    "/var/backups/db_backup.sql": {"type": "file", "content": "-- Fake DB backup", "owner": "root", "permissions": "rw-------", "mtime": datetime.now().strftime("%Y-%m-%d %H:%M:%S")},
+    "/etc/ssh": {"type": "dir", "contents": ["sshd_config"], "owner": "root", "permissions": "rwxr-xr-x", "mtime": datetime.now().strftime("%Y-%m-%d %H:%M:%S")},
+    "/etc/ssh/sshd_config": {"type": "file", "content": "PermitRootLogin no", "owner": "root", "permissions": "rw-r--r--", "mtime": datetime.now().strftime("%Y-%m-%d %H:%M:%S")},
+    "/etc/cron.d": {"type": "dir", "contents": ["backup"], "owner": "root", "permissions": "rwxr-xr-x", "mtime": datetime.now().strftime("%Y-%m-%d %H:%M:%S")},
+    "/etc/cron.d/backup": {"type": "file", "content": "0 3 * * * root /usr/local/bin/cleanup.sh", "owner": "root", "permissions": "rw-r--r--", "mtime": datetime.now().strftime("%Y-%m-%d %H:%M:%S")},
     "/tmp": {"type": "dir", "contents": [], "owner": "root", "permissions": "rwxrwxrwt", "mtime": datetime.now().strftime("%Y-%m-%d %H:%M:%S")},
     "/etc": {"type": "dir", "contents": ["passwd", "shadow", "group"], "owner": "root", "permissions": "rwxr-xr-x", "mtime": datetime.now().strftime("%Y-%m-%d %H:%M:%S")},
     "/etc/passwd": {"type": "file", "content": "\n".join(f"{user}:x:{info['uid']}:1000::{info['home']}:/bin/bash" for user, info in PREDEFINED_USERS.items() if info.get("home", "").startswith("/home")), "owner": "root", "permissions": "rw-r--r--", "mtime": datetime.now().strftime("%Y-%m-%d %H:%M:%S")},
@@ -482,6 +501,12 @@ def populate_predefined_users(fs):
 def add_vulnerabilities(fs):
     fs["/tmp/suspicious.sh"] = {"type": "file", "content": "#!/bin/bash\necho 'Running script...'\ncurl http://example.com", "owner": "root", "permissions": "rwxr-xr-x", "mtime": datetime.now().strftime("%Y-%m-%d %H:%M:%S")}
     fs["/tmp"]["contents"].append("suspicious.sh")
+    fs["/var/tmp/backdoor.sh"] = {"type": "file", "content": "#!/bin/bash\necho 'Backdoor active'", "owner": "root", "permissions": "rwxr-xr-x", "mtime": datetime.now().strftime("%Y-%m-%d %H:%M:%S")}
+    if "/var/tmp" not in fs:
+        fs["/var/tmp"] = {"type": "dir", "contents": [], "owner": "root", "permissions": "rwxrwxrwt", "mtime": datetime.now().strftime("%Y-%m-%d %H:%M:%S")}
+    if "backdoor.sh" not in fs["/var/tmp"]["contents"]:
+        fs["/var/tmp"]["contents"].append("backdoor.sh")
+    fs["/opt/secret/passwords.txt"]["mtime"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     fs["/home/admin/backup_pass.txt"] = {"type": "file", "content": "root:admin123\nbackup_user:backup456", "owner": "admin", "permissions": "rw-rw-r--", "mtime": datetime.now().strftime("%Y-%m-%d %H:%M:%S")}
     fs["/home/admin"]["contents"].append("backup_pass.txt")
 
