@@ -641,7 +641,18 @@ def log_activity(session_id, client_ip, username, key):
     elif KEY_DISPLAY_MODE == 'filtered':
         print(f"\033[95m[KEY]\033[0m {username}@{client_ip}: {repr(key)}")
 
-def log_session_activity(session_id, client_ip, username, command_line, output):
+def log_session_activity(
+    session_id,
+    client_ip,
+    username,
+    command_line,
+    output,
+    success=None,
+    cwd=None,
+    cmd_index=None,
+    start_time=None,
+    end_time=None,
+):
     timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     log_entry = {
         "event": "command",
@@ -652,8 +663,34 @@ def log_session_activity(session_id, client_ip, username, command_line, output):
         "command": command_line,
         "output": output,
     }
+    if cwd is not None:
+        log_entry["cwd"] = cwd
+    if cmd_index is not None:
+        log_entry["index"] = cmd_index
+    if start_time is not None:
+        log_entry["start_time"] = start_time
+    if end_time is not None:
+        log_entry["end_time"] = end_time
+        if start_time is not None:
+            duration_ms = (
+                datetime.fromisoformat(end_time) - datetime.fromisoformat(start_time)
+            ).total_seconds() * 1000
+            log_entry["duration_ms"] = int(duration_ms)
+    if success is not None:
+        log_entry["success"] = success
     LOGGER.info(json.dumps(log_entry))
-    print(f"\033[96m[SESSION]\033[0m {timestamp} {username}@{client_ip}: {command_line} -> {output}")
+    if success is None:
+        status_text = "in-progress"
+    else:
+        status_text = "success" if success else "failure"
+    duration_msg = ""
+    if "duration_ms" in log_entry:
+        duration_msg = f", {log_entry['duration_ms']}ms"
+    index_msg = f"#{cmd_index} " if cmd_index is not None else ""
+    cwd_msg = f"[{cwd}] " if cwd is not None else ""
+    print(
+        f"\033[96m[SESSION]\033[0m {timestamp} {username}@{client_ip} {cwd_msg}{index_msg}{command_line} -> {output} ({status_text}{duration_msg})"
+    )
 
 # Détection de bruteforce
 def check_bruteforce(client_ip, username, password):
@@ -964,7 +1001,6 @@ def process_command(cmd, current_dir, username, fs, client_ip, session_id, sessi
     arg_str = " ".join(cmd_parts[1:]) if len(cmd_parts) > 1 else ""
     jobs = jobs or []
     session_log.append(f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] {username}@{client_ip}: {cmd}")
-    log_session_activity(session_id, client_ip, username, cmd, output)
     command_seq = " ".join(command_history[-5:] + [cmd])
     malicious_patterns = {"rm -rf /": 10, "rm -rf": 8, "wget": 3, "curl": 3, "format": 7, "reboot": 4, "nc -l": 8, "exploit_db": 8, "metasploit": 8, "reverse_shell": 8, "whoami.*sudo": 6}
     risk_score = sum(malicious_patterns.get(pattern, 0) for pattern in malicious_patterns if pattern in command_seq.lower())
@@ -1535,7 +1571,21 @@ def handle_ssh_session(chan, client_ip, username, session_id, transport):
             )
             if not cmd or cmd == "exit":
                 break
-            
+
+            command_index = cmd_count + 1
+            start_time = datetime.now().isoformat()
+            log_session_activity(
+                session_id,
+                client_ip,
+                username,
+                cmd,
+                "",
+                success=None,
+                cwd=current_dir,
+                cmd_index=command_index,
+                start_time=start_time,
+            )
+
             output, current_dir, jobs, cmd_count, should_exit = process_command(
                 cmd, current_dir, username, FS, client_ip, session_id, session_log,
                 history, chan, jobs, cmd_count
@@ -1546,6 +1596,21 @@ def handle_ssh_session(chan, client_ip, username, session_id, transport):
                 formatted = formatted.rstrip("\n")
                 formatted = formatted.replace("\n", "\r\n") + "\r\n"
                 chan.send(formatted.encode())
+            error_keywords = ["not found", "no such file", "permission denied", "error", "failed", "missing"]
+            success = not any(k in output.lower() for k in error_keywords)
+            end_time = datetime.now().isoformat()
+            log_session_activity(
+                session_id,
+                client_ip,
+                username,
+                cmd,
+                output,
+                success,
+                cwd=current_dir,
+                cmd_index=command_index,
+                start_time=start_time,
+                end_time=end_time,
+            )
             if should_exit:
                 break
             
