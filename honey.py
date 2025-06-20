@@ -1541,8 +1541,11 @@ def handle_ssh_session(chan, client_ip, username, session_id, transport):
                 history, chan, jobs, cmd_count
             )
             if output:
-                formatted = output.replace("\n", "\r\n")
-                chan.send((formatted + "\r\n").encode())
+                # Normalize line endings to avoid duplicated carriage returns
+                formatted = output.replace("\r\n", "\n").replace("\r", "\n")
+                formatted = formatted.rstrip("\n")
+                formatted = formatted.replace("\n", "\r\n") + "\r\n"
+                chan.send(formatted.encode())
             if should_exit:
                 break
             
