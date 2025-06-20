@@ -197,7 +197,16 @@ COMMAND_OPTIONS = {
     "telnet": [],
     "ping": ["-c", "-i"],
     "nmap": ["-sS", "-sV"],
-    "man": ["--help"]
+    "man": ["--help", "-k", "-f"]
+}
+
+# Minimal manual pages for built-in commands
+MAN_PAGES = {
+    "ls": """LS(1)\nNAME\n    ls - list directory contents\n\nSYNOPSIS\n    ls [OPTION]... [FILE]...\n\nDESCRIPTION\n    List information about the FILEs (the current directory by default).""",
+    "cd": """CD(1)\nNAME\n    cd - change the shell working directory\n\nSYNOPSIS\n    cd [DIRECTORY]\n\nDESCRIPTION\n    Change the current directory to DIRECTORY.""",
+    "pwd": """PWD(1)\nNAME\n    pwd - print name of current working directory\n\nSYNOPSIS\n    pwd\n\nDESCRIPTION\n    Display the full pathname of the current directory.""",
+    "man": """MAN(1)\nNAME\n    man - an interface to the system reference manuals\n\nSYNOPSIS\n    man [COMMAND]\n\nDESCRIPTION\n    Display the manual page for COMMAND.""",
+    "who": """WHO(1)\nNAME\n    who - show who is logged on\n\nSYNOPSIS\n    who\n\nDESCRIPTION\n    List logged in users.""",
 }
 
 # Colored prompt helper
@@ -442,7 +451,7 @@ BASE_FILE_SYSTEM = {
     "/usr": {"type": "dir", "contents": ["bin", "local"], "owner": "root", "permissions": "rwxr-xr-x", "mtime": datetime.now().strftime("%Y-%m-%d %H:%M:%S")},
     "/usr/bin": {"type": "dir", "contents": ["python3", "man"], "owner": "root", "permissions": "rwxr-xr-x", "mtime": datetime.now().strftime("%Y-%m-%d %H:%M:%S")},
     "/usr/bin/python3": {"type": "file", "content": "#!/usr/bin/python3\n", "owner": "root", "permissions": "rwxr-xr-x", "mtime": datetime.now().strftime("%Y-%m-%d %H:%M:%S")},
-    "/usr/bin/man": {"type": "file", "content": "#!/bin/sh\necho 'No manual entry'\n", "owner": "root", "permissions": "rwxr-xr-x", "mtime": datetime.now().strftime("%Y-%m-%d %H:%M:%S")},
+    "/usr/bin/man": {"type": "file", "content": "#!/bin/sh\necho 'Use the built-in man command'\n", "owner": "root", "permissions": "rwxr-xr-x", "mtime": datetime.now().strftime("%Y-%m-%d %H:%M:%S")},
     "/usr/local": {"type": "dir", "contents": ["bin"], "owner": "root", "permissions": "rwxr-xr-x", "mtime": datetime.now().strftime("%Y-%m-%d %H:%M:%S")},
     "/usr/local/bin": {"type": "dir", "contents": [], "owner": "root", "permissions": "rwxr-xr-x", "mtime": datetime.now().strftime("%Y-%m-%d %H:%M:%S")},
     "/lib": {"type": "dir", "contents": [], "owner": "root", "permissions": "rwxr-xr-x", "mtime": datetime.now().strftime("%Y-%m-%d %H:%M:%S")},
@@ -1327,10 +1336,32 @@ def process_command(cmd, current_dir, username, fs, client_ip, session_id, sessi
                 output = f"apt-get: unknown command '{arg_str}'"
             trigger_alert(session_id, "Package Manager Command", f"Executed apt-get: {cmd}", client_ip, username)
     elif cmd_name == "man":
-        if arg_str:
-            output = f"No manual entry for {arg_str}"
-        else:
+        args = cmd_parts[1:]
+        if not args:
             output = "What manual page do you want?"
+        elif "-k" in args:
+            try:
+                keyword = args[args.index("-k") + 1]
+            except IndexError:
+                keyword = ""
+            results = [f"{name} - {page.splitlines()[1].strip()}" for name, page in MAN_PAGES.items() if keyword.lower() in page.lower()]
+            output = "\n".join(results) if results else f"{keyword}: nothing appropriate."
+        elif "-f" in args:
+            keywords = args[args.index("-f") + 1:]
+            lines = []
+            for kw in keywords:
+                if kw in MAN_PAGES:
+                    desc = MAN_PAGES[kw].splitlines()[1].strip()
+                    lines.append(f"{kw}: {desc}")
+                else:
+                    lines.append(f"{kw}: nothing appropriate.")
+            output = "\n".join(lines)
+        else:
+            page = MAN_PAGES.get(args[0])
+            if page:
+                output = page
+            else:
+                output = f"No manual entry for {args[0]}"
         trigger_alert(session_id, "Command Executed", f"Requested man page for {arg_str if arg_str else 'none'}", client_ip, username)
     elif cmd_name == "who":
         output = get_dynamic_who()
