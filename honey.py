@@ -196,7 +196,8 @@ COMMAND_OPTIONS = {
     "wget": ["-O", "-q", "--help"],
     "telnet": [],
     "ping": ["-c", "-i"],
-    "nmap": ["-sS", "-sV"]
+    "nmap": ["-sS", "-sV"],
+    "man": ["--help"]
 }
 
 # Colored prompt helper
@@ -439,8 +440,9 @@ BASE_FILE_SYSTEM = {
     "/dev/zero": {"type": "file", "content": get_dev_zero, "owner": "root", "permissions": "rw-rw-rw-", "mtime": datetime.now().strftime("%Y-%m-%d %H:%M:%S")},
     "/home": {"type": "dir", "contents": [], "owner": "root", "permissions": "rwxr-xr-x", "mtime": datetime.now().strftime("%Y-%m-%d %H:%M:%S")},
     "/usr": {"type": "dir", "contents": ["bin", "local"], "owner": "root", "permissions": "rwxr-xr-x", "mtime": datetime.now().strftime("%Y-%m-%d %H:%M:%S")},
-    "/usr/bin": {"type": "dir", "contents": ["python3"], "owner": "root", "permissions": "rwxr-xr-x", "mtime": datetime.now().strftime("%Y-%m-%d %H:%M:%S")},
+    "/usr/bin": {"type": "dir", "contents": ["python3", "man"], "owner": "root", "permissions": "rwxr-xr-x", "mtime": datetime.now().strftime("%Y-%m-%d %H:%M:%S")},
     "/usr/bin/python3": {"type": "file", "content": "#!/usr/bin/python3\n", "owner": "root", "permissions": "rwxr-xr-x", "mtime": datetime.now().strftime("%Y-%m-%d %H:%M:%S")},
+    "/usr/bin/man": {"type": "file", "content": "#!/bin/sh\necho 'No manual entry'\n", "owner": "root", "permissions": "rwxr-xr-x", "mtime": datetime.now().strftime("%Y-%m-%d %H:%M:%S")},
     "/usr/local": {"type": "dir", "contents": ["bin"], "owner": "root", "permissions": "rwxr-xr-x", "mtime": datetime.now().strftime("%Y-%m-%d %H:%M:%S")},
     "/usr/local/bin": {"type": "dir", "contents": [], "owner": "root", "permissions": "rwxr-xr-x", "mtime": datetime.now().strftime("%Y-%m-%d %H:%M:%S")},
     "/lib": {"type": "dir", "contents": [], "owner": "root", "permissions": "rwxr-xr-x", "mtime": datetime.now().strftime("%Y-%m-%d %H:%M:%S")},
@@ -495,6 +497,7 @@ def get_completions(current_input, current_dir, username, fs, history):
         "telnet",
         "ping",
         "nmap",
+        "man",
         "arp",
         "scp",
         "sftp",
@@ -1323,6 +1326,12 @@ def process_command(cmd, current_dir, username, fs, client_ip, session_id, sessi
             else:
                 output = f"apt-get: unknown command '{arg_str}'"
             trigger_alert(session_id, "Package Manager Command", f"Executed apt-get: {cmd}", client_ip, username)
+    elif cmd_name == "man":
+        if arg_str:
+            output = f"No manual entry for {arg_str}"
+        else:
+            output = "What manual page do you want?"
+        trigger_alert(session_id, "Command Executed", f"Requested man page for {arg_str if arg_str else 'none'}", client_ip, username)
     elif cmd_name == "who":
         output = get_dynamic_who()
         trigger_alert(session_id, "Command Executed", "Displayed user list", client_ip, username)
