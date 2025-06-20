@@ -437,18 +437,46 @@ BASE_FILE_SYSTEM = {
     "/dev": {"type": "dir", "contents": ["null", "zero"], "owner": "root", "permissions": "rwxr-xr-x", "mtime": datetime.now().strftime("%Y-%m-%d %H:%M:%S")},
     "/dev/null": {"type": "file", "content": get_dev_null, "owner": "root", "permissions": "rw-rw-rw-", "mtime": datetime.now().strftime("%Y-%m-%d %H:%M:%S")},
     "/dev/zero": {"type": "file", "content": get_dev_zero, "owner": "root", "permissions": "rw-rw-rw-", "mtime": datetime.now().strftime("%Y-%m-%d %H:%M:%S")},
+    "/root": {"type": "dir", "contents": ["Desktop", "Documents", "Downloads", "Pictures", "Music", "Videos"], "owner": "root", "permissions": "rwx------", "mtime": datetime.now().strftime("%Y-%m-%d %H:%M:%S")},
+    "/root/Desktop": {"type": "dir", "contents": [], "owner": "root", "permissions": "rwx------", "mtime": datetime.now().strftime("%Y-%m-%d %H:%M:%S")},
+    "/root/Documents": {"type": "dir", "contents": [], "owner": "root", "permissions": "rwx------", "mtime": datetime.now().strftime("%Y-%m-%d %H:%M:%S")},
+    "/root/Downloads": {"type": "dir", "contents": [], "owner": "root", "permissions": "rwx------", "mtime": datetime.now().strftime("%Y-%m-%d %H:%M:%S")},
+    "/root/Pictures": {"type": "dir", "contents": [], "owner": "root", "permissions": "rwx------", "mtime": datetime.now().strftime("%Y-%m-%d %H:%M:%S")},
+    "/root/Music": {"type": "dir", "contents": [], "owner": "root", "permissions": "rwx------", "mtime": datetime.now().strftime("%Y-%m-%d %H:%M:%S")},
+    "/root/Videos": {"type": "dir", "contents": [], "owner": "root", "permissions": "rwx------", "mtime": datetime.now().strftime("%Y-%m-%d %H:%M:%S")},
 }
 
 def populate_predefined_users(fs):
     if "/home" not in fs:
         fs["/home"] = {"type": "dir", "contents": [], "owner": "root", "permissions": "rwxr-xr-x", "mtime": datetime.now().strftime("%Y-%m-%d %H:%M:%S")}
+    subdirs = ["Desktop", "Documents", "Downloads", "Pictures", "Music", "Videos"]
     for user, info in PREDEFINED_USERS.items():
         home_dir = info["home"]
-        fs[home_dir] = {"type": "dir", "contents": list(info["files"].keys()), "owner": user, "permissions": "rwxr-xr-x", "mtime": datetime.now().strftime("%Y-%m-%d %H:%M:%S")}
+        fs[home_dir] = {
+            "type": "dir",
+            "contents": list(info["files"].keys()) + subdirs,
+            "owner": user,
+            "permissions": "rwxr-xr-x",
+            "mtime": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+        }
         if user not in fs["/home"]["contents"] and home_dir.startswith("/home/"):
             fs["/home"]["contents"].append(user)
+        for sub in subdirs:
+            fs[f"{home_dir}/{sub}"] = {
+                "type": "dir",
+                "contents": [],
+                "owner": user,
+                "permissions": "rwxr-xr-x",
+                "mtime": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+            }
         for filename, content in info["files"].items():
-            fs[f"{home_dir}/{filename}"] = {"type": "file", "content": content, "owner": user, "permissions": "rw-r--r--", "mtime": datetime.now().strftime("%Y-%m-%d %H:%M:%S")}
+            fs[f"{home_dir}/{filename}"] = {
+                "type": "file",
+                "content": content,
+                "owner": user,
+                "permissions": "rw-r--r--",
+                "mtime": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+            }
     return fs
 
 def add_vulnerabilities(fs):
