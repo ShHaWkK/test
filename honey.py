@@ -204,8 +204,52 @@ FAKE_NETWORK_HOSTS = {
     "192.168.1.30": {"name": "backup.local", "services": ["ftp"]}
 }
 
+# Jeu de données MySQL fictif pour le sous-système SQL
+FAKE_MYSQL_DATA = {
+    "users_db": {
+        "credentials": {
+            "columns": ["id", "user", "password"],
+            "rows": [
+                (1, "admin", "hunter2"),
+                (2, "guest", "guestpass"),
+            ],
+        },
+        "access_logs": {
+            "columns": ["id", "user", "time"],
+            "rows": [
+                (1, "admin", "2024-01-01 00:00:00"),
+                (2, "guest", "2024-01-01 01:00:00"),
+            ],
+        },
+    },
+    "logs": {
+        "events": {
+            "columns": ["id", "event"],
+            "rows": [
+                (1, "login"),
+                (2, "logout"),
+            ],
+        },
+        "connections": {
+            "columns": ["id", "ip"],
+            "rows": [
+                (1, "192.168.1.10"),
+                (2, "192.168.1.20"),
+            ],
+        },
+    },
+    "secrets": {
+        "flags": {
+            "columns": ["flag"],
+            "rows": [
+                ("FLAG{dummy_flag}",),
+            ],
+        }
+    }
+}
+
 COMMAND_OPTIONS = {
-    "ls": ["-l", "-a", "-la", "-lh", "--help"],
+    "ls": ["-l", "-a", "-n", "-la", "-ln", "-lh", "-lhS", "--help"],
     "cat": ["-n", "--help"],
     "grep": ["-i", "-r", "-n", "--help"],
     "find": ["-name", "-type", "-exec", "--help"],
@@ -552,6 +596,15 @@ def get_completions(current_input, current_dir, username, fs, history):
         "status_report",
         "jobs",
     ]
+    if current_dir == "__mysql__":
+        mysql_words = ["SELECT", "FROM", "WHERE", "SHOW", "USE", "DESCRIBE", "EXIT", "\\q"]
+        mysql_words += list(FAKE_MYSQL_DATA.keys())
+        for db in FAKE_MYSQL_DATA.values():
+            mysql_words.extend(db.keys())
+        if not current_input.strip():
+            return sorted(mysql_words)
+        partial = current_input.strip().split()[-1]
+        return sorted([w for w in mysql_words if w.lower().startswith(partial.lower())])
     if not current_input.strip():
         return sorted(base_cmds)
     parts = current_input.strip().split()
@@ -994,6 +1047,17 @@ def _format_ls_columns(items, width=80):
         lines.append("".join(padded))
     return "\r\n".join(lines)
 
+def _human_size(size):
+    units = ['B', 'K', 'M', 'G']
+    for unit in units:
+        if size < 1024 or unit == units[-1]:
+            return f"{size}{unit}"
+        size //= 1024
+
+def _random_permissions():
+    patterns = ['rwxr-xr-x', 'rw-r--r--', 'rwx------', 'rwxrwxr-x', 'rw-rw-r--', 'rwxr-x---']
+    return random.choice(patterns)
+
 def ftp_session(chan, host, username, session_id, client_ip, session_log):
     history = []
     jobs = []
@@ -1021,41 +1085,40 @@ def mysql_session(chan, username, session_id, client_ip, session_log):
     history = []
     jobs = []
     cmd_count = 0
-    fake_databases = {
-        "users_db": ["credentials", "access_logs"],
-        "logs": ["events", "connections"],
-        "secrets": ["flags"],
-        "information_schema": [],
-        "users": ["creds"],
-        "vault": ["keys"],
-    }
     chan.send(b"Welcome to the MySQL monitor.  Commands end with ; or \g.\r\n")
     chan.send(b"Your MySQL connection id is 1\r\n")
     chan.send(b"Server version: 5.7.42 MySQL Community Server (fake)\r\n\r\n")
     current_db = None
+    buffer = ""
     while True:
-        mysql_cmd, _, _ = read_line_advanced(chan, "mysql> ", history, "", username, FS, session_log, session_id, client_ip, jobs, cmd_count)
-        if not mysql_cmd or mysql_cmd.strip().lower() in ["exit", "quit", "\\q"]:
+        prompt = b"mysql> " if not buffer else b"    -> "
+        line, _, _ = read_line_advanced(chan, prompt.decode(), history, "__mysql__", username, FS, session_log, session_id, client_ip, jobs, cmd_count)
+        if not line:
+            continue
+        if line.strip().lower() in ["exit", "quit", "\\q"]:
             chan.send(b"Bye\r\n")
             break
-        cmd_l = mysql_cmd.strip().lower()
-        if cmd_l.startswith("show databases") or cmd_l.startswith("show database"):
-            chan.send(b"+--------------------+\r\n")
-            chan.send(b"| Database           |\r\n")
-            chan.send(b"+--------------------+\r\n")
-            for db in fake_databases.keys():
+        buffer += line.strip() + " "
+        if not buffer.strip().endswith(";") and not buffer.strip().endswith("\\g"):
+            continue
+        mysql_cmd = buffer.strip().rstrip(";").rstrip("\\g").strip()
+        buffer = ""
+        cmd_l = mysql_cmd.lower()
+        if cmd_l.startswith("show databases"):
+            chan.send(b"+--------------------+\r\n| Database           |\r\n+--------------------+\r\n")
+            for db in FAKE_MYSQL_DATA.keys():
                 chan.send(f"| {db.ljust(18)} |\r\n".encode())
             chan.send(b"+--------------------+\r\n")
-            rows = str(len(fake_databases))
-            chan.send(f"{rows} rows in set (0.00 sec)\r\n".encode())
+            chan.send(f"{len(FAKE_MYSQL_DATA)} rows in set (0.00 sec)\r\n".encode())
         elif cmd_l.startswith("use"):
-            current_db = mysql_cmd.split()[1] if len(mysql_cmd.split()) > 1 else None
+            db = mysql_cmd.split()[1] if len(mysql_cmd.split()) > 1 else None
+            current_db = db if db in FAKE_MYSQL_DATA else None
             chan.send(b"Database changed\r\n")
         elif cmd_l.startswith("show tables"):
-            if not current_db or current_db not in fake_databases:
+            if not current_db or current_db not in FAKE_MYSQL_DATA:
                 chan.send(b"Empty set (0.00 sec)\r\n")
             else:
-                tables = fake_databases[current_db]
+                tables = FAKE_MYSQL_DATA[current_db].keys()
                 header = f"| Tables_in_{current_db} |"
                 chan.send(b"+" + b"-" * (len(header) - 2) + b"+\r\n")
                 chan.send(f"{header}\r\n".encode())
@@ -1063,21 +1126,40 @@ def mysql_session(chan, username, session_id, client_ip, session_log):
                 for t in tables:
                     chan.send(f"| {t.ljust(len(header)-4)} |\r\n".encode())
                 chan.send(b"+" + b"-" * (len(header) - 2) + b"+\r\n")
-                chan.send(f"{len(tables)} rows in set (0.00 sec)\r\n".encode())
-        elif cmd_l.startswith("select") and "from credentials" in cmd_l:
-            chan.send(b"+----------------------+-----------------+\r\n")
-            chan.send(b"| email                | password        |\r\n")
-            chan.send(b"+----------------------+-----------------+\r\n")
-            chan.send(b"| admin@example.com    | hunter2         |\r\n")
-            chan.send(b"| user@example.com     | password123     |\r\n")
-            chan.send(b"+----------------------+-----------------+\r\n2 rows in set (0.00 sec)\r\n")
-
-            if current_db == "users":
-                chan.send(b"+-------+\r\n| Table |\r\n+-------+\r\n| creds |\r\n+-------+\r\n1 row in set (0.00 sec)\r\n")
+                chan.send(f"{len(list(tables))} rows in set (0.00 sec)\r\n".encode())
+        elif cmd_l.startswith("describe"):
+            table = mysql_cmd.split()[1] if len(mysql_cmd.split()) > 1 else ""
+            if current_db and table in FAKE_MYSQL_DATA.get(current_db, {}):
+                cols = FAKE_MYSQL_DATA[current_db][table]["columns"]
+                chan.send(b"+-------+\r\n| Field |\r\n+-------+\r\n")
+                for c in cols:
+                    chan.send(f"| {c.ljust(5)} |\r\n".encode())
+                chan.send(b"+-------+\r\n")
+                chan.send(f"{len(cols)} rows in set (0.00 sec)\r\n".encode())
             else:
                 chan.send(b"Empty set (0.00 sec)\r\n")
-        elif "select" in cmd_l and "from users" in cmd_l:
-            chan.send(b"+----+-------+\r\n| id | user  |\r\n+----+-------+\r\n|  1 | admin |\r\n|  2 | guest |\r\n+----+-------+\r\n2 rows in set (0.00 sec)\r\n")
+        elif cmd_l.startswith("select") and "from" in cmd_l:
+            parts = mysql_cmd.split()
+            if "from" in [p.lower() for p in parts]:
+                table = parts[parts.index("from") + 1]
+                db = current_db
+                if "." in table:
+                    db, table = table.split(".", 1)
+                if db in FAKE_MYSQL_DATA and table in FAKE_MYSQL_DATA[db]:
+                    data = FAKE_MYSQL_DATA[db][table]
+                    cols = data["columns"]
+                    rows = data["rows"]
+                    border = "+" + "+".join(["-" * (len(c) + 2) for c in cols]) + "+"
+                    chan.send((border + "\r\n").encode())
+                    chan.send(("| " + " | ".join(cols) + " |\r\n").encode())
+                    chan.send((border + "\r\n").encode())
+                    for r in rows:
+                        chan.send(("| " + " | ".join(str(x) for x in r) + " |\r\n").encode())
+                    chan.send((border + f"\r\n{len(rows)} rows in set (0.00 sec)\r\n").encode())
+                else:
+                    chan.send(b"Empty set (0.00 sec)\r\n")
+            else:
+                chan.send(b"Query OK, 0 rows affected (0.00 sec)\r\n")
         else:
             chan.send(b"Query OK, 0 rows affected (0.00 sec)\r\n")
     session_log.append("MySQL session closed")
@@ -1111,41 +1193,49 @@ def process_command(cmd, current_dir, username, fs, client_ip, session_id, sessi
     except sqlite3.Error as e:
         print(f"[!] Command logging error: {e}")
     if cmd_name in ["ls", "dir"]:
-        path = arg_str if arg_str else current_dir
+        options = set()
+        targets = []
+        for part in cmd_parts[1:]:
+            if part.startswith("-"):
+                options.update(part[1:])
+            else:
+                targets.append(part)
+        path = targets[0] if targets else current_dir
         path = os.path.normpath(path if path.startswith("/") else f"{current_dir}/{path}")
         if path in fs and fs[path]["type"] == "dir" and "contents" in fs[path]:
-            if "-l" in cmd_parts:
+            items = fs[path]["contents"]
+            display = items if "a" in options else [i for i in items if not i.startswith(".")]
+            entries = []
+            for name in display:
+                full = f"{path}/{name}" if path != "/" else f"/{name}"
+                if full in fs:
+                    entry = fs[full]
+                    size = len(entry.get("content", "") if entry["type"] == "file" and not callable(entry.get("content")) else "") if entry["type"] == "file" else 0
+                    entries.append((name, entry["type"], size, entry.get("owner", username), entry.get("mtime", datetime.now().strftime("%b %d %H:%M"))))
+            if "S" in options:
+                entries.sort(key=lambda x: x[2], reverse=True)
+            else:
+                entries.sort(key=lambda x: x[0])
+            if "l" in options:
                 lines = []
-                for item in fs[path]["contents"]:
-                    full_path = f"{path}/{item}" if path != "/" else f"/{item}"
-                    if full_path in fs:
-                        item_type = "d" if fs[full_path]["type"] == "dir" else "-"
-                        perms = fs[full_path].get("permissions", "rw-r--r--")
-                        size = len(fs[full_path].get("content", "") if fs[full_path]["type"] == "file" and not callable(fs[full_path]["content"]) else "") if fs[full_path]["type"] == "file" else 0
-                        mod_time = fs[full_path].get("mtime", datetime.now().strftime("%b %d %H:%M"))
-                        lines.append(f"{item_type}{perms}  1 {fs[full_path].get('owner', username)} {username} {size:>8} {mod_time} {item}")
+                for name, typ, size, owner, mtime in entries:
+                    item_type = "d" if typ == "dir" else "-"
+                    perms = _random_permissions()
+                    size_disp = _human_size(size) if "h" in options else str(size)
+                    grp = owner
+                    if "n" in options:
+                        owner = str(PREDEFINED_USERS.get(owner, {}).get("uid", 1000))
+                        grp = str(1000)
+                    lines.append(f"{item_type}{perms} 1 {owner} {grp} {size_disp:>8} {mtime} {name}")
                 output = "\n".join(lines)
             else:
-                if random.random() < 0.3:
-                    trap_file = f".trap_{random.randint(1, 1000)}.txt"
-                    if trap_file not in fs[path]["contents"]:
-                        fs[path]["contents"].append(trap_file)
-                        fs[f"{path}/{trap_file}"] = {"type": "file", "content": f"Data {random.randint(1, 1000)}", "owner": "root", "permissions": "rw-r--r--", "mtime": datetime.now().strftime("%Y-%m-%d %H:%M:%S"), "expires": time.time() + 3600}
-                        trigger_alert(session_id, "Trap Triggered", f"User {username} triggered trap {trap_file} in {path}", client_ip, username)
-                files = [f for f in fs[path]["contents"] if not f.startswith(".trap_") or fs.get(f"{path}/{f}", {}).get("expires", 0) > time.time()]
-                colored = []
-                for name in sorted(files):
-                    full = f"{path}/{name}" if path != "/" else f"/{name}"
-                    if full in fs:
-                        if fs[full]["type"] == "dir":
-                            colored.append(f"\033[01;34m{name}\033[0m")
-                        elif "x" in fs[full].get("permissions", ""):
-                            colored.append(f"\033[01;32m{name}\033[0m")
-                        else:
-                            colored.append(name)
+                names = []
+                for name, typ, _, _, _ in entries:
+                    if typ == "dir":
+                        names.append(f"\033[01;34m{name}\033[0m")
                     else:
-                        colored.append(name)
-                output = _format_ls_columns(colored)
+                        names.append(name)
+                output = _format_ls_columns(names)
         else:
             output = f"ls: cannot access '{arg_str}': No such file or directory"
     elif cmd_name == "cd":
