@@ -21,4 +21,3 @@ Le shell intègre une autocomplétion similaire à celle de Bash : un appui sur
 complète la commande ou le chemin lorsqu'une seule option est possible ou qu'un
 préfixe commun est détecté. Deux appuis successifs sur `Tab` affichent la liste
 des choix disponibles sous forme de colonnes.
-
