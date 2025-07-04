@@ -14,3 +14,11 @@ Ce projet propose un serveur SSH simulant un environnement Linux complet. Une fo
 - **SCP** : `scp` affiche une erreur de connexion (simulation).
 
 Toutes ces connexions sont entièrement simulées et enregistrées afin d'analyser le comportement d'un potentiel attaquant.
+
+## Autocomplétion améliorée
+
+Le shell intègre une autocomplétion similaire à celle de Bash : un appui sur `Tab`
+complète la commande ou le chemin lorsqu'une seule option est possible ou qu'un
+préfixe commun est détecté. Deux appuis successifs sur `Tab` affichent la liste
+des choix disponibles sous forme de colonnes.
+
