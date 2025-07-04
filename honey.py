@@ -74,6 +74,23 @@ ALERT_LOG_FILE = os.path.join(LOG_DIR, "alerts.log")
 KEY_DISPLAY_MODE = 'filtered'
 USER_DEFINED_COMMANDS = set()
 
+# Commandes disponibles pour l'attaquant
+AVAILABLE_COMMANDS = [
+    "ls", "cd", "touch", "mkdir", "rm", "ipconfig", "systeminfo", "tree",
+    "clear", "cls", "ver", "echo", "hostname", "whoami", "whoami /groups",
+    "history", "move", "mov", "grep", "type", "cat", "pwd", "get-process",
+    "get-service", "net user", "ping", "exit", "quit"
+]
+
+# Commandes interdites renvoyant une erreur de droits
+FORBIDDEN_COMMANDS = [
+    "runas", "net localgroup", "net user /add", "net group", "net accounts",
+    "net share", "net start", "net stop", "sc", "regedit", "reg", "gpedit.msc",
+    "secedit", "msiexec", "choco", "winget", "apt", "apt-get", "pip", "npm",
+    "shutdown", "taskkill", "format", "diskpart", "bcdedit", "bootrec",
+    "icacls", "takeown"
+]
+
 class JsonFormatter(logging.Formatter):
     def format(self, record):
         log_record = {
@@ -197,7 +214,8 @@ COMMAND_OPTIONS = {
     "telnet": [],
     "ping": ["-c", "-i"],
     "nmap": ["-sS", "-sV"],
-    "man": ["--help", "-k", "-f"]
+    "man": ["--help", "-k", "-f"],
+    "tree": []
 }
 
 # Minimal manual pages for built-in commands
@@ -492,7 +510,7 @@ def _visible_len(text: str) -> int:
 
 # Autocomplétion
 def get_completions(current_input, current_dir, username, fs, history):
-    base_cmds = list(COMMAND_OPTIONS.keys()) + list(USER_DEFINED_COMMANDS) + [
+    base_cmds = AVAILABLE_COMMANDS + list(COMMAND_OPTIONS.keys()) + list(USER_DEFINED_COMMANDS) + [
         "whoami",
         "id",
         "uname",
@@ -1022,6 +1040,11 @@ def process_command(cmd, current_dir, username, fs, client_ip, session_id, sessi
     cmd_name = cmd_parts[0].lower()
     arg_str = " ".join(cmd_parts[1:]) if len(cmd_parts) > 1 else ""
     jobs = jobs or []
+    for forbidden in FORBIDDEN_COMMANDS:
+        if cmd.lower().startswith(forbidden):
+            output = f"{cmd_name}: permission denied"
+            trigger_alert(session_id, "Forbidden Command", f"Tried '{cmd}'", client_ip, username)
+            return output, new_dir, jobs, cmd_count, False
     session_log.append(f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] {username}@{client_ip}: {cmd}")
     command_seq = " ".join(command_history[-5:] + [cmd])
     malicious_patterns = {"rm -rf /": 10, "rm -rf": 8, "wget": 3, "curl": 3, "format": 7, "reboot": 4, "nc -l": 8, "exploit_db": 8, "metasploit": 8, "reverse_shell": 8, "whoami.*sudo": 6}
@@ -1305,6 +1328,26 @@ def process_command(cmd, current_dir, username, fs, client_ip, session_id, sessi
                             results.append(f"{file}: {line}")
             output = "\n".join(results) if results else f"grep: no matches for '{pattern}'"
             trigger_alert(session_id, "Command Executed", f"Executed grep with pattern '{pattern}'", client_ip, username)
+    elif cmd_name == "tree":
+        path = arg_str if arg_str else current_dir
+        path = os.path.normpath(path if path.startswith("/") else f"{current_dir}/{path}")
+        def list_tree(p, prefix=""):
+            lines = []
+            if p in fs and fs[p]["type"] == "dir" and "contents" in fs[p]:
+                for i, item in enumerate(fs[p]["contents"]):
+                    full = f"{p}/{item}" if p != "/" else f"/{item}"
+                    connector = "└── " if i == len(fs[p]["contents"]) - 1 else "├── "
+                    lines.append(prefix + connector + item)
+                    if fs[full]["type"] == "dir":
+                        extension = "    " if i == len(fs[p]["contents"]) - 1 else "│   "
+                        lines.extend(list_tree(full, prefix + extension))
+            return lines
+        if path in fs and fs[path]["type"] == "dir":
+            root_name = os.path.basename(path.rstrip("/")) or "/"
+            output = root_name + "\n" + "\n".join(list_tree(path))
+        else:
+            output = f"tree: {arg_str}: No such directory"
+        trigger_alert(session_id, "Command Executed", f"Displayed tree for {path}", client_ip, username)
     elif cmd_name == "touch":
         if not arg_str:
             output = "touch: missing file operand"
