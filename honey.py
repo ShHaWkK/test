@@ -72,6 +72,13 @@ ALERT_LOG_FILE = os.path.join(LOG_DIR, "alerts.log")
 
 # Console key logging level: 'full', 'filtered'
 KEY_DISPLAY_MODE = 'filtered'
+# Mapping of ANSI escape sequences to human readable labels
+ANSI_KEY_LABELS = {
+    "\x1b[A": "<UP>",
+    "\x1b[B": "<DOWN>",
+    "\x1b[C": "<RIGHT>",
+    "\x1b[D": "<LEFT>",
+}
 USER_DEFINED_COMMANDS = set()
 
 # Commandes disponibles pour l'attaquant
@@ -706,6 +713,7 @@ def trigger_alert(session_id, event_type, details, client_ip, username):
             print(f"[!] DB error: {e}")
 
 def log_activity(session_id, client_ip, username, key):
+    key = ANSI_KEY_LABELS.get(key, key)
     if KEY_DISPLAY_MODE != 'full':
         if (len(key) == 1 and key.isprintable()) or key in ['\n', '\r', '\t', '\x7f', '\x08']:
             return
