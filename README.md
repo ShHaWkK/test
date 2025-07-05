@@ -11,7 +11,17 @@ Ce projet propose un serveur SSH simulant un environnement Linux complet. Une fo
 - **Ping** : `ping <hôte>` pour tester la présence d'une machine.
 - **Nmap** : `nmap <cible>` simule un scan de ports.
 - **CURL/WGET** : `curl <url>` ou `wget <url>` pour simuler un téléchargement.
-- **SCP** : `scp` affiche une erreur de connexion (simulation).
+- **SCP** : `scp` renvoie une permission refusée (simulation).
+- **Traceroute** : `traceroute <hôte>` ou `tracepath <hôte>` montrent des sauts fictifs.
+- **Dig/Nslookup** : résolvent un domaine avec des enregistrements simulés.
+- **Tcpdump** : capture quelques paquets factices.
+- **Netcat** : `nc` permet un écho simulé en écoute ou en connexion.
+- **SS** : affiche une table de sockets simulée.
+- **Gestion de paquets** : `apt-get`, `yum`, `dnf` ou `apk` exécutent des transactions fictives.
+- **Pip/Npm** : installation de paquets simulée avec message de succès.
+- **Outils de build** : `gcc`, `make` ou `cmake` compilent virtuellement.
+- **REPL** : `python` ou `node` ouvrent une console interactive factice.
+- **Git et Docker/Kubernetes** : commandes de base simulées.
 
 Toutes ces connexions sont entièrement simulées et enregistrées afin d'analyser le comportement d'un potentiel attaquant.
 
