@@ -109,6 +109,29 @@ AVAILABLE_COMMANDS = [
     "get-service",
     "net user",
     "ping",
+    "traceroute",
+    "tracepath",
+    "dig",
+    "nslookup",
+    "tcpdump",
+    "nc",
+    "netcat",
+    "ss",
+    "yum",
+    "dnf",
+    "apk",
+    "pip",
+    "npm",
+    "gcc",
+    "make",
+    "cmake",
+    "python",
+    "node",
+    "git",
+    "docker",
+    "kubectl",
+    "helm",
+    "docker-compose",
     "exit",
     "quit",
 ]
@@ -133,8 +156,7 @@ FORBIDDEN_COMMANDS = [
     "winget",
     "apt",
     "apt-get",
-    "pip",
-    "npm",
+    "scp",
     "shutdown",
     "taskkill",
     "format",
@@ -314,6 +336,29 @@ COMMAND_OPTIONS = {
     "nmap": ["-sS", "-sV"],
     "man": ["--help", "-k", "-f"],
     "tree": [],
+    "traceroute": [],
+    "tracepath": [],
+    "dig": [],
+    "nslookup": [],
+    "tcpdump": [],
+    "nc": ["-l"],
+    "netcat": ["-l"],
+    "ss": [],
+    "yum": ["install", "update", "remove"],
+    "dnf": ["install", "update", "remove"],
+    "apk": ["add", "del", "update"],
+    "pip": ["install"],
+    "npm": ["install"],
+    "gcc": [],
+    "make": [],
+    "cmake": [],
+    "python": [],
+    "node": [],
+    "git": ["status", "push", "pull"],
+    "docker": ["ps", "images"],
+    "kubectl": ["get", "describe"],
+    "helm": ["list"],
+    "docker-compose": ["up", "down"],
 }
 
 # Minimal manual pages for built-in commands
@@ -517,6 +562,54 @@ def get_dynamic_network_scan():
             if port:
                 lines.append(f"{ip}:{port} open {service}")
     return "\r\n".join(lines)
+
+
+@lru_cache(maxsize=10)
+def get_dynamic_traceroute(host):
+    """Genere un traceroute fictif vers la cible."""
+    hops = random.randint(5, 10)
+    lines = [f"traceroute to {host} ({host}), {hops} hops max"]
+    for i in range(1, hops + 1):
+        ip = f"10.0.{random.randint(0, 255)}.{random.randint(1, 254)}"
+        latency = random.uniform(1.0, 100.0)
+        lines.append(f" {i}  {ip}  {latency:.2f} ms")
+    lines.append(f" {hops + 1}  {host}  {random.uniform(0.1, 1.0):.2f} ms")
+    return "\r\n".join(lines)
+
+
+@lru_cache(maxsize=10)
+def get_dynamic_dig(query):
+    """Renvoie une reponse DNS fictive."""
+    ip = f"203.0.113.{random.randint(1, 254)}"
+    return (
+        f"; <<>> DiG 9.18 <<>> {query}\n"
+        ";; ANSWER SECTION:\n"
+        f"{query}. 86400 IN A {ip}\n"
+        f"{query}. 86400 IN NS ns1.example.com.\n"
+        f"{query}. 86400 IN NS ns2.example.com."
+    )
+
+
+@lru_cache(maxsize=10)
+def get_dynamic_tcpdump():
+    """Genere quelques en-tetes de paquets simulés."""
+    lines = []
+    for _ in range(random.randint(3, 6)):
+        src = f"192.168.1.{random.randint(2, 254)}"
+        dst = f"10.0.0.{random.randint(1, 254)}"
+        sport = random.randint(1024, 65535)
+        dport = random.choice([22, 80, 443, 3306])
+        proto = random.choice(["TCP", "UDP"])
+        lines.append(
+            f"{proto} {src}:{sport} > {dst}:{dport} Flags [S], length 0"
+        )
+    return "\r\n".join(lines)
+
+
+@lru_cache(maxsize=10)
+def get_dynamic_ss():
+    """Simule la commande 'ss' en reutilisant netstat."""
+    return get_dynamic_netstat()
 
 
 @lru_cache(maxsize=10)
@@ -1034,6 +1127,14 @@ def get_completions(current_input, current_dir, username, fs, history):
             "telnet",
             "ping",
             "nmap",
+            "traceroute",
+            "tracepath",
+            "dig",
+            "nslookup",
+            "tcpdump",
+            "nc",
+            "netcat",
+            "ss",
             "man",
             "arp",
             "scp",
@@ -1145,7 +1246,18 @@ def get_completions(current_input, current_dir, username, fs, history):
             else (partial.rsplit("/", 1)[0] + "/") if "/" in partial else ""
         )
         return sorted([f"{prefix}{c}" for c in completions])
-    if cmd in ["ping", "telnet", "nmap", "scp", "curl", "wget"]:
+    if cmd in [
+        "ping",
+        "telnet",
+        "nmap",
+        "traceroute",
+        "tracepath",
+        "dig",
+        "nslookup",
+        "scp",
+        "curl",
+        "wget",
+    ]:
         for ip, info in FAKE_NETWORK_HOSTS.items():
             if info["name"].startswith(partial) or ip.startswith(partial):
                 completions.append(info["name"])
@@ -1871,6 +1983,90 @@ def mysql_session(chan, username, session_id, client_ip, session_log):
     session_log.append("MySQL session closed")
 
 
+def python_repl(chan, username, session_id, client_ip, session_log):
+    """Ouvre un petit interpréteur Python fictif."""
+    history = []
+    jobs = []
+    cmd_count = 0
+    chan.send(b"Python 3.10.0 (default, fake)\r\nType 'exit()' to quit\r\n>>> ")
+    while True:
+        line, _, _ = read_line_advanced(
+            chan,
+            ">>> ",
+            history,
+            "",
+            username,
+            FS,
+            session_log,
+            session_id,
+            client_ip,
+            jobs,
+            cmd_count,
+        )
+        if not line or line.strip() in ["exit()", "quit()", "exit", "quit"]:
+            chan.send(b"\r\n")
+            break
+        chan.send(f"{line}\r\n".encode())
+    session_log.append("Python REPL closed")
+
+
+def node_repl(chan, username, session_id, client_ip, session_log):
+    """Simule un shell Node.js minimal."""
+    history = []
+    jobs = []
+    cmd_count = 0
+    chan.send(b"Welcome to Node.js v18 (fake). Type 'exit' to quit.\r\n> ")
+    while True:
+        line, _, _ = read_line_advanced(
+            chan,
+            "> ",
+            history,
+            "",
+            username,
+            FS,
+            session_log,
+            session_id,
+            client_ip,
+            jobs,
+            cmd_count,
+        )
+        if not line or line.strip() in ["exit", "quit"]:
+            chan.send(b"\r\n")
+            break
+        chan.send(f"{line}\r\n".encode())
+    session_log.append("Node REPL closed")
+
+
+def netcat_session(chan, listening, host, port, username, session_id, client_ip, session_log):
+    """Session netcat tres simplifiee."""
+    history = []
+    jobs = []
+    cmd_count = 0
+    if listening:
+        chan.send(f"Listening on port {port} (simulated)\r\n".encode())
+    else:
+        chan.send(f"Connected to {host}:{port} (simulated)\r\n".encode())
+    while True:
+        line, _, _ = read_line_advanced(
+            chan,
+            "",
+            history,
+            "",
+            username,
+            FS,
+            session_log,
+            session_id,
+            client_ip,
+            jobs,
+            cmd_count,
+        )
+        if not line or line.strip().lower() in ["exit", "quit"]:
+            break
+        chan.send(f"{line}\r\n".encode())
+    chan.send(b"\r\n")
+    session_log.append("Netcat session closed")
+
+
 def process_command(
     cmd,
     current_dir,
@@ -2309,6 +2505,87 @@ def process_command(
                 client_ip,
                 username,
             )
+    elif cmd_name in ["traceroute", "tracepath"]:
+        if not arg_str:
+            output = f"{cmd_name}: missing host"
+        else:
+            host = arg_str.split()[0]
+            output = get_dynamic_traceroute(host)
+        trigger_alert(
+            session_id,
+            "Network Command",
+            f"Executed {cmd_name} to {arg_str}",
+            client_ip,
+            username,
+        )
+    elif cmd_name in ["dig", "nslookup"]:
+        if not arg_str:
+            output = f"{cmd_name}: missing query"
+        else:
+            query = arg_str.split()[0]
+            output = get_dynamic_dig(query)
+        trigger_alert(
+            session_id,
+            "Network Command",
+            f"Executed {cmd_name}: {arg_str}",
+            client_ip,
+            username,
+        )
+    elif cmd_name == "tcpdump":
+        output = get_dynamic_tcpdump()
+        trigger_alert(
+            session_id,
+            "Network Command",
+            "Captured packets via tcpdump",
+            client_ip,
+            username,
+        )
+    elif cmd_name in ["nc", "netcat"]:
+        if "-l" in cmd_parts:
+            port = arg_str.split()[-1] if arg_str.split() else "1234"
+            netcat_session(
+                chan,
+                True,
+                "",
+                port,
+                username,
+                session_id,
+                client_ip,
+                session_log,
+            )
+            return "", new_dir, jobs, cmd_count, False
+        elif len(cmd_parts) >= 3:
+            host = cmd_parts[1]
+            port = cmd_parts[2]
+            netcat_session(
+                chan,
+                False,
+                host,
+                port,
+                username,
+                session_id,
+                client_ip,
+                session_log,
+            )
+            return "", new_dir, jobs, cmd_count, False
+        else:
+            output = f"{cmd_name}: invalid arguments"
+        trigger_alert(
+            session_id,
+            "Network Command",
+            f"Executed {cmd_name}: {arg_str}",
+            client_ip,
+            username,
+        )
+    elif cmd_name == "ss":
+        output = get_dynamic_ss()
+        trigger_alert(
+            session_id,
+            "Network Command",
+            "Displayed socket list via ss",
+            client_ip,
+            username,
+        )
     elif cmd_name == "arp":
         output = get_dynamic_arp()
         trigger_alert(
@@ -2512,6 +2789,43 @@ def process_command(
                 client_ip,
                 username,
             )
+    elif cmd_name in ["yum", "dnf", "apk"]:
+        if not arg_str:
+            output = f"{cmd_name}: missing command"
+        else:
+            action = arg_str.split()[0]
+            pkg = " ".join(arg_str.split()[1:]) or "all packages"
+            if action in ["install", "update", "remove"]:
+                output = f"{cmd_name}: {action}ing {pkg} (simulated)"
+            else:
+                output = f"{cmd_name}: unknown command '{arg_str}'"
+        trigger_alert(
+            session_id,
+            "Package Manager Command",
+            f"Executed {cmd_name}: {cmd}",
+            client_ip,
+            username,
+        )
+    elif cmd_name == "pip" and arg_str.startswith("install"):
+        pkg = arg_str.split("install", 1)[-1].strip() or "package"
+        output = f"Collecting {pkg}\nSuccessfully installed {pkg.replace(' ', '-')}"
+        trigger_alert(
+            session_id,
+            "Package Manager Command",
+            f"Executed pip install: {pkg}",
+            client_ip,
+            username,
+        )
+    elif cmd_name == "npm" and arg_str.startswith("install"):
+        pkg = arg_str.split("install", 1)[-1].strip() or "package"
+        output = f"added 1 package in 0.0s\nSuccessfully installed {pkg}"
+        trigger_alert(
+            session_id,
+            "Package Manager Command",
+            f"Executed npm install: {pkg}",
+            client_ip,
+            username,
+        )
     elif cmd_name == "man":
         args = cmd_parts[1:]
         if not args:
@@ -2654,6 +2968,58 @@ def process_command(
             session_id,
             "Service Command",
             f"Executed systemctl: {cmd}",
+            client_ip,
+            username,
+        )
+    elif cmd_name in ["gcc", "make", "cmake"]:
+        output = "compiling...\n"
+        if random.random() < 0.8:
+            output += "build succeeded"
+        else:
+            output += "error: undefined reference"
+        trigger_alert(
+            session_id,
+            "Build Tool",
+            f"Executed {cmd_name}: {arg_str}",
+            client_ip,
+            username,
+        )
+    elif cmd_name == "python":
+        python_repl(chan, username, session_id, client_ip, session_log)
+        return "", new_dir, jobs, cmd_count, False
+    elif cmd_name == "node":
+        node_repl(chan, username, session_id, client_ip, session_log)
+        return "", new_dir, jobs, cmd_count, False
+    elif cmd_name == "git":
+        output = "On branch main\nYour branch is up to date with 'origin/main'.\n"
+        if "push" in cmd_parts:
+            output += "remote: access denied"
+        elif "status" in cmd_parts:
+            output += "nothing to commit, working tree clean"
+        else:
+            output += "Everything up-to-date"
+        trigger_alert(
+            session_id,
+            "Git Command",
+            f"Executed git: {cmd}",
+            client_ip,
+            username,
+        )
+    elif cmd_name in ["docker", "kubectl", "helm"]:
+        output = f"Listing {cmd_name} objects (simulated)"
+        trigger_alert(
+            session_id,
+            "Container Command",
+            f"Executed {cmd_name}: {arg_str}",
+            client_ip,
+            username,
+        )
+    elif cmd_name == "docker-compose":
+        output = "Bringing up services from docker-compose.yml (simulated)"
+        trigger_alert(
+            session_id,
+            "Container Command",
+            "Executed docker-compose up",
             client_ip,
             username,
         )
