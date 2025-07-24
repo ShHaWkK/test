@@ -1,0 +1,366 @@
+#! /usr/bin/env python
+# -*- coding:utf-8 -*
+from BaseHTTPServer import BaseHTTPRequestHandler, HTTPServer
+from SocketServer import ThreadingMixIn
+from threading import Thread
+import urlparse,os,socket,struct,re,uuid,sys,json,hashlib,time,re,ssl,datetime,errno
+
+CHANNELS = 6
+certfile = '/certificates/media.crt' 
+keyfile = '/certificates/media.key' 
+prod = True
+home = "/voxygen"
+googVoices = {
+	"shweta" :	"hi-IN-Standard-A",
+	"pradeep" :	"hi-IN-Standard-B",
+	"julia" : 	"it-IT-Wavenet-A",
+	"angela" :	"de-DE-Wavenet-A",
+	"viktor" : 	"de-DE-Wavenet-B",
+	"francesca":	"es-ES-Standard-A",
+	"pedro":	"es-ES-Wavenet-B",
+	"hilde":	"nl-NL-Wavenet-A",
+	"karen":	"da-DK-Wavenet-A",
+	"emily":	"en-AU-Wavenet-A",
+	"peter":	"en-AU-Wavenet-B",
+	"elisabeth":	"en-GB-Wavenet-A",
+	"robert":	"en-GB-Wavenet-B",
+	"stan":		"en-US-Wavenet-A",
+	"john":		"en-US-Wavenet-B",
+	"sean":		"en-US-Wavenet-C",
+	"justin":	"en-US-Wavenet-D",
+	"claudia":	"en-US-Wavenet-E",
+	"lily":		"en-US-Wavenet-f",
+	"celine":	"fr-CA-Wavenet-A",
+	"jacqueline":	"fr-CA-Wavenet-C",
+	"jacques":	"fr-CA-Wavenet-B",
+	"bertrand":	"fr-CA-Wavenet-D",
+	"agathe":	"fr-FR-Wavenet-A",
+	"jeremy":	"fr-FR-Wavenet-B",
+	"louise":	"fr-FR-Wavenet-C",
+	"pierre":	"fr-FR-Wavenet-D",
+	"aiko":		"ja-JP-Wavenet-A",
+	"jeong-ja":	"ko-KR-Wavenet-A",
+	"adriana":	"nb-no-Wavenet-E",
+	"nathalia":	"pl-PL-Wavenet-A",
+	"marta":	"pt-PT-Wavenet-D",
+	"christiano":	"pt-PT-Wavenet-C",
+	"valeria":	"ru-RU-Wavenet-C",
+	"laura":	"sv-SE-Wavenet-A",
+	"arina":	"uk-UA-Wavenet-A",
+	"hakan":	"tr-TR-Wavenet-E",
+	
+	"eduard": 	"nl-NL-Wavenet-B",
+	"amir"	:	"ar-XA-Wavenet-B",
+	"yasmine":	"ar-XA-Wavenet-A",
+	"eva":		"cs-CZ-Wavenet-A",
+	"veera" : 	"fi-FI-Wavenet-A",
+	"elena" : 	"el-GR-Wavenet-A",
+	"fanni" : 	"hu-HU-Wavenet-A",
+	"annisa" : 	"id-ID-Wavenet-A",
+	"nino" : 	"it-IT-Wavenet-C",
+	"sakura" : 	"ja-JP-Wavenet-A",
+	"takumi" : 	"ja-JP-Wavenet-C",
+	"fang": 	"cmn-CN-Wavenet-A",
+	"kang": 	"cmn-CN-Wavenet-B",
+	"zora" : 	"sk-SK-Wavenet-A",
+	"kim" : 	"vi-VN-Wavenet-A"
+	
+	
+}
+
+voxygenVoices = {
+	"agnes": "fabienne",
+	"fabienne": "fabienne",
+	"marion": "marion",
+	"bibi": "judith",
+	"judith": "judith",
+	"loic": "loic",
+	"freddy": "freddy"
+
+}
+
+class TextToSpeechApi(BaseHTTPRequestHandler):
+    
+    def do_GET(self):
+	qs = {}
+	path = self.path
+	response = 0
+	host = self.headers.get('Host')
+	httpParams = {}
+        if '?' in path:
+                path,variable = path.split('?')
+               	httpParams = urlparse.parse_qs(variable)
+
+        #print('Request '+str(self.headers))
+	content_length = self.headers.getheaders('content-length')
+	length = int(content_length[0]) if content_length else 0
+    	if length > 0 : # POST
+    		httpParams = urlparse.parse_qs(self.rfile.read(length))
+
+        print('Request '+str(path)+" "+str(httpParams))
+	# Get Files
+	if path[0:5] == "/ping":
+		self.send_response(200)
+		self.end_headers()
+		return
+
+	elif path[0:10] == "/api/data/":
+		print( path[10:] )
+		if not os.path.exists("data/"+path[10:]):
+			self.send_response(404)
+			self.end_headers()
+	        	return
+
+		f = open("data/"+path[10:], 'rb')
+                data = f.read()
+                md5 = hashlib.md5()
+                md5.update(data)
+                md5_key = self.headers.getheader('If-None-Match')
+                
+                # Cached Not my problem
+		if md5_key:
+                  if md5_key[1:-1] == md5.hexdigest():
+                    self.send_response(304)
+                    self.send_header('ETag', '"{0}"'.format(md5.hexdigest()))
+                    self.send_header('Keep-Alive', 'timeout=5, max=100')
+                    self.end_headers()
+                    return
+                    
+                self.send_response(200)
+		self.send_header('Content-type',    'audio/mpeg')
+		self.send_header('Content-Length', os.fstat(f.fileno()).st_size )
+		self.send_header("Content-Transfer-Encoding", "binary")
+		self.send_header('Accept-Ranges', "bytes")
+		self.send_header('Last-Modified', time.strftime("%a %d %b %Y %H:%M:%S GMT", time.localtime(os.path.getmtime("data/"+path[10:]))))
+                self.send_header('ETag', '"{0}"'.format(md5.hexdigest()))
+		self.send_header("Content-Disposition", "attachment; filename=data/"+path[10:])
+		self.send_header("Expires","0")
+		self.send_header("Cache-Control","no-cache, must-revalidate")
+		self.send_header("Pragma","no-cache")
+		self.end_headers()
+		self.wfile.write(data)
+		f.close()
+	        return
+
+	elif path[0:14] == "/api/index.php" or path[0:4] == "/api" or path[0:13] == "/api/live.php" or path[0:5] == "/live" :
+
+		if path[0:13] == "/api/live.php" or path[0:5] == "/live":
+			realtime = True
+		else:
+			realtime = False
+	
+		# TAB MODEL
+		GET = 	{ 	'key': None, 
+				'text2speech': None, 
+				"vox": "marion", 
+				"format": "wav",	
+				"frequency": "48000",
+				"timbre": "0",
+				"volume": "100",
+				"rate": "0"
+			}
+		params = {}
+		for key,value in httpParams.items():
+			if key == 'key':
+				pass
+			elif key == 'vox':
+				GET['vox'] = value[0]
+				continue
+			elif key == 'format':
+				if value[0] == 'mp3':
+					params['coding'] = "mp3:160-0"
+				else:
+					params['coding'] = "lin"
+				pass
+			elif key == 'frequency':
+				params['frequency'] = value[0]
+				pass
+			elif key in ('timbre','volume','rate'):
+				pass
+			elif key == "text":
+				GET['text2speech'] = value[0]
+				continue
+			GET[key] = value[0]
+		
+		if not GET['text2speech']:
+
+			return
+
+		# Not for SSML
+		if GET['vox'] in voxygenVoices.keys():
+			for each in ('timbre', 'rate', 'volume'):
+				if each in GET:
+					if each in ('timbre','rate') and ( not GET[each] or GET[each] == "0" ) :
+						continue
+					elif each == "volume" and ( not GET[each] or GET[each] == "100" ) :
+						continue
+					if GET[each][0] != "-":
+						GET[each] = "+"+str(GET[each])
+					GET['text2speech'] = "\\"+str(each)+"{"+GET[each]+"%}"+GET['text2speech']
+	
+			if GET['vox']:
+				if GET['vox'] == "bibi":
+ 					GET['vox'] = "judith" 
+				GET['text2speech'] = "\\vox{"+str(GET['vox'])+"}"+GET['text2speech']
+
+
+		# Directory
+		salt = uuid.uuid4()
+		fileName = str(salt)
+
+		dataPath = "data/"+str(datetime.date.today().strftime("%Y%m%d"))
+		if not os.path.isdir(dataPath):
+			os.mkdir(dataPath)
+
+		# Remove old Files	
+		os.system('find data/* -mtime +3 -delete')
+
+		# SSML
+		if GET['vox'] in googVoices.keys():
+			GET['vox'] = googVoices[GET['vox']]
+
+			#Break
+			GET['text2speech'] = GET['text2speech'].replace('"', "'")
+			rate = None
+			volume = None
+			for each in ('timbre', 'rate', 'volume'):
+                                if each in GET:
+                                        if each in ('timbre','rate') and ( not GET[each] or GET[each] == "0" ) :
+                                                continue
+                                        elif each == "volume" and ( not GET[each] or GET[each] == "100" ) :
+                                                continue
+                                        if GET[each][0] != "-":
+                                                GET[each] = "+"+str(GET[each])
+					if each == "rate":
+						rate = GET[each]+"%"
+					elif each == "volume":
+						volume = GET[each]+"%"
+                                        
+			GET['text2speech'] = re.sub("\\\\break{([a-zA-Z0-9]+)}", r"<break time='\1'/>", GET['text2speech'] )	
+			GET['text2speech'] = re.sub("\\\\[a-zA-Z0-9]+{[a-zA-Z0-9]+}", '', GET['text2speech'])	
+			
+			if rate is not None and volume is not None:
+				GET['text2speech'] = "<speak><prosody rate='"+str(rate)+"' volume='"+str(volume)+"'>"+GET['text2speech']+"</prosody></speak>"
+			elif rate is not None:
+				GET['text2speech'] = "<speak><prosody rate='"+str(rate)+"'>"+GET['text2speech']+"</prosody></speak>"
+			elif volume is not None:
+				GET['text2speech'] = "<speak><prosody volume='"+str(volume)+"'>"+GET['text2speech']+"</prosody></speak>"
+        		else:
+				GET['text2speech'] = '<speak>'+GET['text2speech']+'</speak>'
+
+
+			os.system(home+"/goog/go-googtts -license "+home+"/goog/license.conf -o "+home+"/"+dataPath+"/"+str(fileName)+".mp3 -lang "+str( GET['vox'] )+' -ssml "'+GET['text2speech']+'"')	
+			GET['status'] = "1"
+			GET['file'] = "https://"+host.replace(':444',':443')+"/api/"+dataPath+"/"+str(fileName)+".mp3"
+
+		else:
+
+			# Voxygen
+			GET['text2speech'] = GET['text2speech'].replace('{agnes}', "{fabienne}")
+			nb = re.split('\\\break{([4-9]|[0-9]{2,})s}', GET['text2speech'])
+			try:
+
+				if realtime :
+					params['realtime'] = "0 0.0"
+				if len(nb) > 1:
+					i = 0
+					for each in nb:
+						if i%2==0:
+							pass
+
+						else:
+							pass
+							
+						i+=1
+					i = 0
+					query = ""
+					for each in nb:
+						if i%2==0:
+							query += dataPath+"/"+str(i)+"-"+str(fileName)+"."+str(GET['format'])+" "
+						else:
+							query += dataPath+"/"+str(i)+"-"+str(fileName)+".wav "
+						i+=1
+					os.system('sox '+query+' '+dataPath+"/"+str(fileName)+"."+str(GET['format'])+' &> /dev/null')
+						
+				else:
+					pass
+				GET['status'] = "1"
+				GET['file'] = "https://"+host.replace(':444',':443')+"/api/"+dataPath+"/"+str(fileName)+"."+str(GET['format'])
+			except Exception as inst:
+				GET['status'] = "0"
+			finally:
+
+				pass
+
+		GET.pop('key')
+		if realtime :
+			if not os.path.exists(dataPath+"/"+str(fileName)+"."+str(GET['format'])):
+				self.send_response(500)
+				self.end_headers()
+				return
+			f = open(dataPath+"/"+str(fileName)+"."+str(GET['format']), 'rb')
+			data = f.read()
+			self.send_response(200)
+			self.send_header('Content-type',    'audio/mpeg')
+			self.send_header('Content-Length', os.fstat(f.fileno()).st_size )
+			self.send_header("Content-Transfer-Encoding", "binary")
+			self.send_header('Accept-Ranges', "bytes")
+			self.send_header('Last-Modified', time.strftime("%a %d %b %Y %H:%M:%S GMT", time.localtime(os.path.getmtime(dataPath+"/"+str(fileName)+"."+str(GET['format'])))))
+                	self.send_header("Content-Disposition", "attachment; filename="+dataPath+"/"+str(fileName)+"."+str(GET['format']))
+                	self.send_header("Expires","0")
+                	self.send_header("Cache-Control","no-cache, must-revalidate")
+                	self.send_header("Pragma","no-cache")
+			self.end_headers()
+			self.wfile.write(data)
+			f.close()
+		else:
+			response = json.dumps(GET)
+			print "Response : "+str(response)
+			self.send_response(200)
+			self.send_header("Content-type", "application/json")
+			self.end_headers()
+			self.wfile.write(response)
+	        return
+
+	else:
+		self.send_response(404)
+		self.end_headers()
+	        return response
+
+    do_POST = do_GET
+    def do_HEAD():
+        return
+
+    def log_request(self, code=None, size=None):
+        return
+
+class ThreadedHTTPServer(ThreadingMixIn, HTTPServer):
+    pass
+
+
+def serveForever ( server80, server443 ):
+	import select
+    	while True:
+        	r,w,e = select.select([server80,server443],[],[],0.1)
+        	if server80 in r:
+            		server80.handle_request()
+        	if server443 in r:
+        		server443.handle_request()
+
+if __name__ == '__main__':
+	if prod :
+    		try:
+			server80 = ThreadedHTTPServer(('', 80), TextToSpeechApi)
+			server443 = ThreadedHTTPServer(('', 443), TextToSpeechApi)
+
+			serveForever(server80,server443)
+    		except KeyboardInterrupt:
+        		server443.socket.close()
+        		server80.socket.close()
+	else:
+		try:
+			server444 = ThreadedHTTPServer(('', 444), TextToSpeechApi)
+
+			server444.serve_forever()
+    		except KeyboardInterrupt:
+        		server444.socket.close()
